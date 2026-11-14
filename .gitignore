@@ -25,3 +25,5 @@ replay_pid*
 
 # pipeline run output
 runs/
+__pycache__/
+*.pyc
