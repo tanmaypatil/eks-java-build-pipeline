@@ -23,12 +23,10 @@ def read_env(path):
 
 
 def defaults_from_run_env():
-    d = {}
-    for line in open(os.path.join(ROOT, "config", "run.env")):
-        m = re.match(r'([A-Z][A-Z0-9_]*)="\$\{\1:-([^}]*)\}"', line.strip())
-        if m:
-            d[m.group(1)] = os.environ.get(m.group(1), m.group(2))
-    return d
+    """Prices and sizes: the run's effective settings if saved, else config/settings.env; env overrides."""
+    eff = os.path.join(run_dir, "settings.effective.env")
+    d = read_env(eff if os.path.exists(eff) else os.path.join(ROOT, "config", "settings.env"))
+    return {k: os.environ.get(k, v) for k, v in d.items()}
 
 
 def ts(s):
@@ -43,13 +41,16 @@ P = {k: float(cfg.get(k, 0)) for k in ("PRICE_EKS_HOUR", "PRICE_NODE_HOUR", "PRI
 
 rows = []
 for f in sorted(glob.glob(os.path.join(res_dir, "*.json"))):
-    if f.endswith((".build.json", ".pod.json")):
+    if f.endswith((".build.json", ".pod.json")) or os.path.basename(f).startswith("_"):
         continue
     try:
         r = json.load(open(f))
     except Exception:
         continue
+    if not isinstance(r, dict):
+        continue
     name = r.get("repo") or os.path.basename(f)[:-5]
+    r["repo"] = name
     pod_f = os.path.join(res_dir, name + ".pod.json")
     r["queue_s"] = r["startup_s"] = None
     if os.path.exists(pod_f):
@@ -80,7 +81,13 @@ tests = sum(r.get("tests") or 0 for r in rows)
 tfail = sum((r.get("failures") or 0) + (r.get("errors") or 0) for r in rows)
 
 def p(k):
-    return int(phases[k]) if k in phases else None
+    # phase names written by the jbp driver: up/deploy/orchestrate/collect/report/down _start|_end
+    aliases = {"run_start": ("run_start", "deploy_start", "orchestrate_start"),
+               "run_end": ("run_end", "collect_end", "orchestrate_end")}
+    for name in aliases.get(k, (k,)):
+        if name in phases:
+            return int(phases[name])
+    return None
 
 run_wall = (p("run_end") or 0) - (p("run_start") or 0) if p("run_start") else None
 up_s = p("up_end") - p("up_start") if p("up_end") and p("up_start") else None
@@ -169,8 +176,12 @@ for r in rows:
         "<td class=num>%s<div class=sub>of %s</div></td>" % (fmt(r.get("peak_mem_mib"), " MiB"), e(str(r.get("pod_mem") or ""))),
         "<td>%s%s</td>" % ('<a href="%s">log</a>' % e(r["log"]) if r.get("log") else "", " · %d tries" % r["attempts"] if r["attempts"] > 1 else ""),
     ]) + "</tr>")
-    if not r["passed"] and r.get("error_excerpt"):
-        trs.append('<tr class="err"><td colspan=13><code>%s</code></td></tr>' % e(r["error_excerpt"].replace("|", "\n")))
+    if not r["passed"]:
+        msg = "\n".join(x for x in [
+            ("[%s] %s" % (r.get("failure_kind"), r.get("failure_message", ""))) if r.get("failure_kind") else "",
+            (r.get("error_excerpt") or "").replace("|", "\n")] if x)
+        if msg:
+            trs.append('<tr class="err"><td colspan=13><code>%s</code></td></tr>' % e(msg))
 
 settings = " · ".join("%s=%s" % (k, e(v)) for k, v in runenv.items() if v and k != "RUN_ID")
 phase_line = " · ".join(x for x in [

@@ -62,18 +62,18 @@ svg.d .arr{fill:var(--mute)}
 
 <!-- 1 -->
 <h2 id="overview"><span class="n">1</span>The whole run</h2>
-<p>One command, <code>bin/all.sh</code>, runs four phases. Your laptop, or any machine with AWS credentials, only drives the run. Every Java build happens inside the cluster.</p>
+<p>One command, <code>./jbp all</code>, runs the whole thing. Whatever runs <code>jbp</code> is the <b>driver</b>: this Claude cloud session (you ask in the chat, Claude runs it) or any machine with Python, the AWS CLI, eksctl, kubectl and AWS credentials. The driver only sends commands to AWS and Kubernetes. Every Java build happens inside the cluster.</p>
 
 <svg class="d" viewBox="0 0 940 330" role="img" aria-label="Run phases">
   <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arr"/></marker></defs>
-  <rect class="b" x="10" y="20" width="200" height="70" rx="8"/><text x="24" y="46">1. bin/up.sh</text><text x="24" y="68" class="m">eksctl: EKS + spot node</text><text x="24" y="84" class="m">~15-20 min</text>
-  <rect class="a" x="250" y="20" width="200" height="70" rx="8"/><text x="264" y="46">2. bin/run.sh</text><text x="264" y="68" class="m">orchestrator + build Jobs</text><text x="264" y="84" class="m">depends on repos</text>
-  <rect class="b" x="490" y="20" width="200" height="70" rx="8"/><text x="504" y="46">3. report</text><text x="504" y="68" class="m">kubectl cp results</text><text x="504" y="84" class="m">make_report.py, ~1 min</text>
-  <rect class="b" x="730" y="20" width="200" height="70" rx="8"/><text x="744" y="46">4. bin/down.sh</text><text x="744" y="68" class="m">ns delete, cluster delete</text><text x="744" y="84" class="m">~10 min, always runs</text>
+  <rect class="b" x="10" y="20" width="200" height="70" rx="8"/><text x="24" y="46">1. UP</text><text x="24" y="68" class="m">eksctl: EKS + spot node</text><text x="24" y="84" class="m">~15-20 min</text>
+  <rect class="a" x="250" y="20" width="200" height="70" rx="8"/><text x="264" y="46">2. DEPLOY + ORCHESTRATE</text><text x="264" y="68" class="m">orchestrator + build Jobs</text><text x="264" y="84" class="m">depends on repos</text>
+  <rect class="b" x="490" y="20" width="200" height="70" rx="8"/><text x="504" y="46">3. COLLECT + REPORT</text><text x="504" y="68" class="m">kubectl cp results</text><text x="504" y="84" class="m">make_report.py, ~1 min</text>
+  <rect class="b" x="730" y="20" width="200" height="70" rx="8"/><text x="744" y="46">4. DOWN</text><text x="744" y="68" class="m">ns delete, cluster delete</text><text x="744" y="84" class="m">~10 min, always runs</text>
   <line x1="210" y1="55" x2="248" y2="55" marker-end="url(#ar)"/><line x1="450" y1="55" x2="488" y2="55" marker-end="url(#ar)"/><line x1="690" y1="55" x2="728" y2="55" marker-end="url(#ar)"/>
   <rect class="b" x="250" y="140" width="680" height="180" rx="10"/>
   <text x="266" y="164">Inside the cluster (namespace jbp, one spot node)</text>
-  <rect class="a" x="270" y="180" width="190" height="88" rx="8"/><text x="284" y="204">Orchestrator Job</text><text x="284" y="224" class="m">alpine/k8s</text><text x="284" y="242" class="m">git clone, detect,</text><text x="284" y="258" class="m">kubectl apply Job</text>
+  <rect class="a" x="270" y="180" width="190" height="88" rx="8"/><text x="284" y="204">Orchestrator Job</text><text x="284" y="224" class="m">orchestrator.py</text><text x="284" y="242" class="m">git clone, detect,</text><text x="284" y="258" class="m">kubectl apply Job</text>
   <rect class="b" x="500" y="180" width="170" height="88" rx="8"/><text x="514" y="204">PVC jbp-workspace</text><text x="514" y="224" class="m">EBS gp3, RWO</text><text x="514" y="242" class="m">repos/ cache/ results/</text>
   <rect class="a" x="710" y="180" width="200" height="88" rx="8"/><text x="724" y="204">Build Job per repo</text><text x="724" y="224" class="m">maven / temurin / gradle</text><text x="724" y="242" class="m">image picked by Java ver.</text><text x="724" y="258" class="m">build.sh</text>
   <line x1="460" y1="224" x2="498" y2="224" marker-end="url(#ar)"/><line x1="670" y1="224" x2="708" y2="224"/><line x1="700" y1="224" x2="672" y2="224" marker-end="url(#ar)"/>
@@ -82,25 +82,31 @@ svg.d .arr{fill:var(--mute)}
 </svg>
 
 <p>The flow from your terminal:</p>
-<pre><code>bin/all.sh
-  trap teardown EXIT INT TERM          # teardown is guaranteed from here on
-  stamp up_start  -> bin/up.sh  -> stamp up_end
-  bin/run.sh                           # stamps run_start, builds_end, run_end
-  (exit) -> stamp down_start -> bin/down.sh -> stamp down_end -> report re-rendered with real teardown time</code></pre>
-<p>Each <code>stamp</code> appends <code>phase=epoch_seconds</code> to <code>runs/&lt;RUN_ID&gt;/phases.env</code>. Those timestamps feed the measured cost in section 8.</p>
+<pre><code>./jbp all                                   pipeline/cli.py
+  try:
+    UP           cluster.up()               eksctl create cluster, StorageClass
+    DEPLOY       ConfigMaps, RBAC, PVC, orchestrator Job
+    ORCHESTRATE  stream the orchestrator's log until its Job is Complete/Failed
+    COLLECT      copy /workspace/results off the PVC
+    REPORT       report/make_report.py
+  finally:                                  # runs on success, error, Ctrl-C and SIGTERM
+    DOWN         cluster.down()             namespace, eksctl delete, poll until AWS shows nothing left
+    REPORT       again, now with the real teardown time in the cost</code></pre>
+<p>Each phase change is logged (<code>=== UP STARTED</code>), written to <code>runs/&lt;RUN_ID&gt;/driver_status.json</code> for <code>jbp status</code>, and timestamped in <code>phases.env</code>, which feeds the measured cost in section 8.</p>
 
 <!-- 2 -->
 <h2 id="cluster"><span class="n">2</span>Cluster lifecycle <span class="status done">built</span></h2>
-<p>Files: <a href="../bin/up.sh"><code>bin/up.sh</code></a>, <a href="../bin/down.sh"><code>bin/down.sh</code></a>, <a href="../bin/leftovers.sh"><code>bin/leftovers.sh</code></a>, settings in <a href="../config/run.env"><code>config/run.env</code></a>.</p>
+<p>File: <a href="../pipeline/cluster.py"><code>pipeline/cluster.py</code></a> (<code>up()</code>, <code>down()</code>, <code>leftovers()</code>, <code>wait_until_clean()</code>), commands <code>jbp up</code> / <code>jbp down</code> / <code>jbp leftovers</code>, settings in <a href="../config/settings.env"><code>config/settings.env</code></a>.</p>
 
-<h3>Creation (<code>bin/up.sh</code>)</h3>
+<h3>Creation (<code>jbp up</code>)</h3>
 <ol>
+<li><b>Check the AWS credentials</b> with <code>aws sts get-caller-identity</code>, so a bad key fails in seconds rather than halfway through eksctl.</li>
 <li><b>Pick the Kubernetes version.</b> With <code>K8S_VERSION=auto</code>, it calls <code>aws eks describe-cluster-versions --version-status STANDARD_SUPPORT</code> and takes the newest. A version in extended support bills the control plane at $0.60/h instead of $0.10/h, so this check protects the budget.</li>
-<li><b>Render an eksctl <code>ClusterConfig</code></b> as a heredoc and run <code>eksctl create cluster -f</code>. eksctl creates two CloudFormation stacks: the cluster (VPC, subnets, IAM roles, control plane) and the node group.</li>
+<li><b>Render an eksctl <code>ClusterConfig</code></b> and run <code>eksctl create cluster -f</code>, streaming eksctl's progress lines into the log as they arrive. eksctl creates two CloudFormation stacks: the cluster (VPC, subnets, IAM roles, control plane) and the node group.</li>
 <li><b>Point kubectl at the cluster</b> with <code>aws eks update-kubeconfig</code>.</li>
 <li><b>Apply the <code>jbp-gp3</code> StorageClass</b>, so the workspace PVC gets an EBS gp3 volume.</li>
 </ol>
-<p>If a cluster with that name already exists, up.sh reuses it. That makes <code>--keep</code> plus repeated runs cheap.</p>
+<p>If a cluster with that name already exists, <code>jbp up</code> reuses it. That makes <code>--keep</code> plus repeated runs cheap.</p>
 
 <h3>What gets created, and why each choice</h3>
 <div class="wrap"><table>
@@ -115,25 +121,25 @@ svg.d .arr{fill:var(--mute)}
 </table></div>
 <p class="why"><b>Why not Karpenter?</b> Karpenter is great for long-lived clusters with changing load. Installing it adds a Helm release, IAM roles, an SQS queue for interruptions and a few minutes per run. For a cluster that lives an hour with a fixed node count, a managed spot node group gives the same price with fewer moving parts. It can come back once runs need several node sizes in one cluster.</p>
 
-<h3>Teardown (<code>bin/down.sh</code>)</h3>
+<h3>Teardown (<code>jbp down</code>)</h3>
 <ol>
 <li><b>Delete the <code>jbp</code> namespace first and wait.</b> This deletes the PVC, so the EBS CSI driver deletes its volume while the driver still exists. If the cluster goes first, the volume is orphaned and keeps billing.</li>
 <li><code>eksctl delete cluster --wait --disable-nodegroup-eviction</code>. It deletes both stacks; skipping eviction saves minutes because nothing on the node needs a graceful drain.</li>
-<li><code>bin/leftovers.sh</code> lists anything still billing: the cluster, <code>eksctl-&lt;name&gt;-*</code> stacks, and volumes tagged <code>jbp-cluster</code>. <code>--delete</code> removes orphaned volumes.</li>
+<li><b>Verify (the poller):</b> <code>wait_until_clean()</code> checks every 30 s, for up to 20 min, that the cluster, every <code>eksctl-&lt;name&gt;-*</code> stack and every volume tagged <code>jbp-cluster</code> are gone. If something is still there it's logged as <code>STILL BILLING</code> and <code>jbp down</code> exits with an error. <code>jbp leftovers [--delete]</code> runs the same check on demand.</li>
 </ol>
-<p>Teardown runs from a shell <code>trap</code> in <code>all.sh</code>, so it fires on success, on any failure (<code>set -e</code>), and on Ctrl-C. It doesn't fire if the laptop itself loses power. That is why <code>leftovers.sh</code> exists.</p>
+<p>Teardown runs from a <code>try/finally</code> in <code>jbp all</code>, with a SIGTERM handler, so it fires on success, on any error, and on Ctrl-C. It can't fire if the driver machine itself dies, or the Claude session is shut down mid-run. That is why <code>leftovers.sh</code> exists.</p>
 
 <!-- 3 -->
 <h2 id="k8s"><span class="n">3</span>Kubernetes objects <span class="status done">built</span></h2>
-<p>All live in the namespace <code>jbp</code> and are created by <a href="../bin/run.sh"><code>bin/run.sh</code></a>. Templates use <code>__VAR__</code> placeholders, filled from environment variables by a small Python <code>render()</code> in <a href="../bin/common.sh"><code>bin/common.sh</code></a>.</p>
+<p>All live in the namespace <code>jbp</code> and are created by <a href="../pipeline/cli.py"><code>jbp run</code></a> (<code>run_on_cluster()</code>). Templates use <code>__VAR__</code> placeholders, filled from the effective settings by <code>render()</code> in <code>pipeline/cli.py</code>.</p>
 <div class="wrap"><table>
 <tr><th>Object</th><th>File</th><th>Purpose</th></tr>
-<tr><td>ConfigMap <code>jbp-scripts</code></td><td><code>scripts/*</code></td><td>orchestrator.sh, detect.sh and build.sh, mounted at <code>/scripts</code>. Stock images can then run our logic, so we don't need our own image or registry.</td></tr>
-<tr><td>ConfigMap <code>jbp-config</code></td><td><code>config/repos.txt</code>, <code>config/images.env</code></td><td>The repo list and the JDK-to-image map, mounted at <code>/config</code>.</td></tr>
+<tr><td>ConfigMap <code>jbp-code</code></td><td><code>pipeline/*</code></td><td>orchestrator.py, detect.py, jbpcore.py and build.sh, mounted at <code>/app</code>. Stock images can then run our logic, so we don't need our own image or registry.</td></tr>
+<tr><td>ConfigMap <code>jbp-config</code></td><td><code>config/repos.txt</code>, <code>config/images.env</code>, effective settings</td><td>The repo list, the JDK-to-image map, and the settings after env-var overrides (so <code>BUILD_CPU=4 ./jbp run</code> reaches the pod), mounted at <code>/config</code>.</td></tr>
 <tr><td>ConfigMap <code>jbp-templates</code></td><td><code>k8s/build-job.tpl.yaml</code></td><td>The build Job template the orchestrator fills in for each repo.</td></tr>
 <tr><td>ServiceAccount + Role + RoleBinding</td><td><code>k8s/rbac.yaml</code></td><td>The orchestrator may create, get, delete and watch Jobs, and read Pods, pod logs and events. Only in this namespace, nothing cluster-wide.</td></tr>
 <tr><td>PVC <code>jbp-workspace</code></td><td><code>k8s/pvc.yaml</code></td><td>30 Gi, ReadWriteOnce, <code>jbp-gp3</code>. Holds <code>repos/</code>, <code>cache/</code> (m2 + gradle) and <code>results/</code>.</td></tr>
-<tr><td>Job <code>jbp-orchestrator</code></td><td><code>k8s/orchestrator-job.yaml</code></td><td>Runs orchestrator.sh (section 4).</td></tr>
+<tr><td>Job <code>jbp-orchestrator</code></td><td><code>k8s/orchestrator-job.yaml</code></td><td>Runs <code>python3 /app/orchestrator.py</code> (section 4).</td></tr>
 <tr><td>Job <code>jbp-build-&lt;repo&gt;</code></td><td><code>k8s/build-job.tpl.yaml</code></td><td>One per repo (section 6).</td></tr>
 <tr><td>Pod <code>jbp-collector</code></td><td><code>k8s/collector-pod.yaml</code></td><td>Sleeps so <code>kubectl cp</code> can copy <code>/workspace/results</code> off the PVC.</td></tr>
 </table></div>
@@ -141,53 +147,63 @@ svg.d .arr{fill:var(--mute)}
 
 <!-- 4 -->
 <h2 id="orchestrator"><span class="n">4</span>Orchestrator Job <span class="status done">built</span></h2>
-<p>File: <a href="../scripts/orchestrator.sh"><code>scripts/orchestrator.sh</code></a>. Image: <code>alpine/k8s:1.35.0</code>, which already has bash, git, jq, kubectl and python3, so nothing gets installed at runtime. It requests 100m CPU and 128 Mi, so it barely takes space from the builds.</p>
+<p>File: <a href="../pipeline/orchestrator.py"><code>pipeline/orchestrator.py</code></a>. Image: <code>alpine/k8s:1.35.0</code>, which already has python3, git and kubectl, so nothing gets installed at runtime. It requests 100m CPU and 128 Mi, so it barely takes space from the builds.</p>
 
-<h3>Loop, for each line of <code>repos.txt</code></h3>
-<pre><code>name url ref subdir overrides
- 1. skip if results/&lt;name&gt;.json exists          (SKIP_DONE=1: resume after a spot reclaim)
- 2. git clone --depth 1 [--branch ref] url /workspace/repos/&lt;name&gt;   (timed: clone_s)
-    (a ref that isn't a branch/tag falls back to a full clone + checkout)
- 3. detect.sh /workspace/repos/&lt;name&gt;/&lt;subdir&gt;  -> TOOL WRAPPER JAVA JAVA_SOURCE
-    overrides in column 5 win: tool=gradle java=21
- 4. pick_jdk:   smallest of SUPPORTED_JDKS (11 17 21 25) that is &gt;= JAVA
- 5. pick_image: maven -> MAVEN_IMAGE_&lt;jdk&gt;
-                gradle + gradlew -> JDK_IMAGE_&lt;jdk&gt;   (wrapper brings its own Gradle)
-                gradle, no wrapper -> GRADLE_IMAGE_&lt;jdk&gt;
- 6. render build-job.tpl.yaml with sed, kubectl apply
- 7. poll the Job every 5 s until succeeded&gt;=1 or condition Failed=True
-    (hard stop at BUILD_TIMEOUT_S + 10 min)
- 8. save the Pod JSON (timeline) and the attempt count
- 9. merge orchestrator facts + the build pod's &lt;name&gt;.build.json -> results/&lt;name&gt;.json</code></pre>
+<h3>Stages, for each line of <code>repos.txt</code></h3>
+<pre><code>name url ref subdir overrides         (bad lines are reported and skipped, not fatal)
+ SKIPPED  already passed in this run         resume after a spot reclaim / re-run; failed ones are retried
+ CLONE    git clone --depth 1 [--branch ref] -> /workspace/repos/&lt;name&gt;
+          retried CLONE_RETRIES times on network errors (timeouts, resets, HTTP 429/5xx), growing back-off;
+          a ref that isn't a branch/tag falls back to a full clone + checkout
+ DETECT   detect.py -> tool, wrapper, Java needed, where it came from      (overrides tool=/java= win)
+          JDK   = smallest of SUPPORTED_JDKS (11 17 21 25) that is &gt;= Java needed
+          image = MAVEN_IMAGE_&lt;jdk&gt; | JDK_IMAGE_&lt;jdk&gt; (gradlew) | GRADLE_IMAGE_&lt;jdk&gt;
+ LAUNCH   render build-job.tpl.yaml, kubectl apply (retried 3x)
+ WAIT     read Job + Pod status every 5 s:
+            succeeded                          -&gt; ok
+            condition Failed (DeadlineExceeded) -&gt; build / timeout
+            ImagePullBackOff &gt; 180 s            -&gt; image          (fail early, not after 30 min)
+            Unschedulable &gt; 600 s               -&gt; unschedulable  (with the scheduler's reason)
+            12 failed API reads in a row        -&gt; infra
+ COLLECT  merge orchestrator facts + the pod's &lt;name&gt;.build.json -&gt; results/&lt;name&gt;.json
+ DONE / FAILED</code></pre>
 
 <h3>Why it's built this way</h3>
 <ul>
 <li><b>Clone in the orchestrator, build in a separate pod.</b> That's your design. It also means build images need no git and no credentials, and clone time is measured apart from build time.</li>
-<li><b>One by one by default</b> (<code>MAX_PARALLEL=1</code>). Each build gets the whole CPU limit, so timings are clean and comparable between runs. With <code>MAX_PARALLEL=N</code>, cloning stays sequential while up to N builds run in the background (<code>wait -n</code>).</li>
-<li><b>Polling instead of <code>kubectl wait</code>.</b> <code>kubectl wait</code> can wait for one condition only, but here we need "Complete <i>or</i> Failed".</li>
-<li><b>Results as files on the PVC</b>, not in logs. They survive an orchestrator restart, which is what makes resume work.</li>
+<li><b>One by one by default</b> (<code>MAX_PARALLEL=1</code>). Each build gets the whole CPU limit, so timings are clean and comparable between runs. With <code>MAX_PARALLEL=N</code>, cloning stays sequential while up to N builds run in a thread pool.</li>
+<li><b>Every stage is wrapped</b>: an exception in one repo is logged with its traceback, recorded with the stage and a <code>failure_kind</code>, and the loop moves on. One repo can never stop the run.</li>
+<li><b>Results as files on the PVC</b>, written atomically (temp file + rename), not in logs. They survive an orchestrator restart, which is what makes resume work.</li>
+<li><b>Two launchers, same code.</b> <code>K8sLauncher</code> creates Jobs; <code>DockerLauncher</code> runs the same image and build.sh with <code>docker run</code>, which is how it's tested without a cluster.</li>
+</ul>
+
+<h3>Tracing: where is it now?</h3>
+<ul>
+<li><b>Log lines</b> look like <code>2026-11-14T11:28:26Z INFO  orchestrator [perf-p2-small-j21|DETECT] tool=maven, needs Java 21 (.mvn/jdk) -&gt; JDK 21, image …</code>. They go to the pod's stdout (streamed to the driver's console with a <code>  | </code> prefix) and to <code>results/orchestrator.log</code>, which also has every command and retry.</li>
+<li><b><code>results/_status.json</code></b> is rewritten on every stage change: each repo's current stage, since when, result and error, plus a summary. <code>jbp status</code> reads it live from the pod.</li>
+<li><b><code>results/events.jsonl</code></b> is the append-only history: one line per stage change, with a timestamp.</li>
 </ul>
 
 <h3>The result record</h3>
-<p><code>results/&lt;repo&gt;.json</code> combines what the orchestrator knows (<code>url, commit, clone_s, repo_kb, tool, wrapper, java_required, java_source, jdk, image, pod_cpu, pod_mem, job_wall_s, ok</code>) with what the build pod measured (<code>rc, build_s, cpu_s, avg_cores, cpu_limit, throttled_pct, peak_mem_mib, oom_kills, tests, failures, errors, skipped, error_excerpt</code>).</p>
+<p><code>results/&lt;repo&gt;.json</code> combines what the orchestrator knows (<code>url, commit, clone_s, repo_kb, tool, wrapper, java_required, java_source, jdk, image, notes, pod_cpu, pod_mem, job_wall_s, attempts, ok, stage, failure_kind, failure_message</code>) with what the build pod measured (<code>rc, build_s, cpu_s, avg_cores, cpu_limit, throttled_pct, peak_mem_mib, oom_kills, tests, failures, errors, skipped, error_excerpt</code>).</p>
 
 <!-- 5 -->
 <h2 id="detect"><span class="n">5</span>Java + build tool detection <span class="status done">built</span></h2>
-<p>File: <a href="../scripts/detect.sh"><code>scripts/detect.sh</code></a>; tests: <a href="../test/detect_test.sh"><code>test/detect_test.sh</code></a> (17 cases).</p>
+<p>File: <a href="../pipeline/detect.py"><code>pipeline/detect.py</code></a> (run it alone: <code>python3 pipeline/detect.py &lt;repo-dir&gt;</code> prints JSON); tests: <a href="../tests/test_detect.py"><code>tests/test_detect.py</code></a> (25 cases).</p>
 <p><b>Tool:</b> <code>pom.xml</code> means Maven, otherwise any <code>build.gradle(.kts)</code> or <code>settings.gradle(.kts)</code> means Gradle. If a repo has both, Maven wins unless <code>tool=gradle</code> is set. If <code>mvnw</code> or <code>gradlew</code> is present, it's used.</p>
 <p><b>Java version, first hit wins:</b></p>
 <ol>
 <li>Explicit version files: <code>.java-version</code>, <code>.sdkmanrc</code>, <code>.tool-versions</code>, <code>.mvn/jdk</code></li>
-<li>Maven, taking the <b>highest</b> value across all module poms: <code>maven.compiler.release</code>, then compiler-plugin <code>&lt;release&gt;</code>, then <code>java.version</code> (Spring Boot), <code>maven.compiler.target</code>, <code>maven.compiler.source</code>, <code>&lt;target&gt;</code>, <code>.mvn/toolchains.xml</code></li>
+<li>Maven: every <code>pom.xml</code> is parsed as XML, and <code>${property}</code> references are resolved, including ones defined in a local parent pom. Taking the <b>highest</b> value across all module poms: <code>maven.compiler.release</code>, then compiler-plugin <code>&lt;release&gt;</code>, then <code>java.version</code> (Spring Boot), <code>maven.compiler.target</code>, <code>maven.compiler.source</code>, <code>&lt;target&gt;</code>, <code>.mvn/toolchains.xml</code></li>
 <li>Gradle: <code>JavaLanguageVersion.of(N)</code>, <code>jvmToolchain(N)</code>, <code>options.release</code>, <code>JavaVersion.VERSION_N</code>, <code>sourceCompatibility</code>, a <code>java.version</code> property</li>
 <li>Otherwise <code>DEFAULT_JAVA</code> (17)</li>
 </ol>
 <p>Values are normalised: <code>1.8</code> becomes 8, <code>17.0.2</code> becomes 17, <code>21.0.1-tem</code> becomes 21. The build runs on the <b>smallest supported JDK at or above</b> that number. Newer JDKs compile older targets through <code>--release N</code>, and picking the smallest keeps runtime behaviour, and Gradle-wrapper compatibility, closest to what the project expects.</p>
-<p class="note">This reads text with regexes; it doesn't evaluate the build. A version that comes from a parent POM in another repo, or that a Gradle script computes, falls back to the default. The report shows <code>java_source</code> so you can spot that, and <code>java=N</code> in repos.txt fixes it.</p>
+<p class="note">This reads the build files; it doesn't run the build. A version inherited from a parent POM that lives in another repo (e.g. a company parent), or one a Gradle script computes, falls back to the default, and a note saying which property couldn't be resolved is logged. The report shows <code>java_source</code> so you can spot that, and <code>java=N</code> in repos.txt fixes it.</p>
 
 <!-- 6 -->
 <h2 id="build"><span class="n">6</span>Build Job <span class="status done">built</span></h2>
-<p>Files: <a href="../k8s/build-job.tpl.yaml"><code>k8s/build-job.tpl.yaml</code></a>, <a href="../scripts/build.sh"><code>scripts/build.sh</code></a>, <a href="../config/images.env"><code>config/images.env</code></a>.</p>
+<p>Files: <a href="../k8s/build-job.tpl.yaml"><code>k8s/build-job.tpl.yaml</code></a>, <a href="../pipeline/build.sh"><code>pipeline/build.sh</code></a> (stays shell: the Maven/Temurin images have no Python), <a href="../config/images.env"><code>config/images.env</code></a>.</p>
 <h3>Pod spec</h3>
 <ul>
 <li><b>Image</b> from <code>images.env</code>, by default pulled from <code>public.ecr.aws/docker/library/</code>. That's AWS's mirror of the Docker official images: no Docker Hub pull limit, and pulls stay inside AWS.</li>
@@ -213,7 +229,7 @@ gradle: gradle|./gradlew --no-daemon --console=plain $GRADLE_ARGS_EXTRA ${GRADLE
 
 <!-- 7 -->
 <h2 id="collect"><span class="n">7</span>Results collection + report <span class="status done">built</span></h2>
-<p>When the orchestrator Job completes, <code>run.sh</code> starts <code>jbp-collector</code> on the same PVC, copies <code>/workspace/results</code> to <code>runs/&lt;RUN_ID&gt;/results</code>, saves <code>nodes.json</code> and <code>run.env</code>, and calls <a href="../report/make_report.py"><code>report/make_report.py</code></a>, which uses only the Python standard library.</p>
+<p>When the orchestrator Job completes, the driver starts <code>jbp-collector</code> on the same PVC, copies <code>/workspace/results</code> to <code>runs/&lt;RUN_ID&gt;/results</code>, saves <code>nodes.json</code> and <code>run.env</code>, and calls <a href="../report/make_report.py"><code>report/make_report.py</code></a>, which uses only the Python standard library.</p>
 <p>From each Pod's JSON the report also derives <code>queue_s</code> (pod created to scheduled: waiting for a node) and <code>startup_s</code> (scheduled to container started: image pull and volume attach). Output:</p>
 <ul>
 <li><code>report.html</code>: a single file with summary tiles, a stacked timeline per repo (clone, wait + pull, build), a per-repo table, a cost section and the run settings. Light and dark mode.</li>
@@ -223,7 +239,7 @@ gradle: gradle|./gradlew --no-daemon --console=plain $GRADLE_ARGS_EXTRA ${GRADLE
 
 <!-- 8 -->
 <h2 id="cost"><span class="n">8</span>Cost model + forecast <span class="status done">built</span></h2>
-<p>File: <code>report/make_report.py</code> (<code>cost()</code>); prices in <code>config/run.env</code>.</p>
+<p>File: <code>report/make_report.py</code> (<code>cost()</code>); prices in <code>config/settings.env</code>.</p>
 <h3>Billed items</h3>
 <div class="wrap"><table>
 <tr><th>Item</th><th>Default price</th><th>Billed for</th></tr>
@@ -234,10 +250,10 @@ gradle: gradle|./gradlew --no-daemon --console=plain $GRADLE_ARGS_EXTRA ${GRADLE
 <tr><td>Not billed</td><td>none</td><td>CloudFormation, data in, ECR Public pulls in-region, GitHub clones.</td></tr>
 </table></div>
 
-<h3>Measured cost (a run through <code>bin/all.sh</code>)</h3>
+<h3>Measured cost (a run through <code>jbp all</code>)</h3>
 <pre><code>control_plane_s = down_end - up_start
 node_s          = (down_start - up_end) + 6 min + 3 min
-                  # nodes start ~6 min before up.sh returns, and die ~3 min into teardown
+                  # nodes start ~6 min before UP finishes, and die ~3 min into teardown
 cost = 0.10 × cp_h + 0.07 × nodes × node_h + EBS + IPv4</code></pre>
 
 <h3>Forecast (any run, even local Docker)</h3>
@@ -257,21 +273,26 @@ IPv4           0.4 h × $0.005                                = $0.002
 <h2 id="failure"><span class="n">9</span>Failure handling</h2>
 <div class="wrap"><table>
 <tr><th>What fails</th><th>What happens</th></tr>
-<tr><td>Clone (bad URL, no access)</td><td>Recorded with <code>stage: clone</code> and git's error; the next repo continues.</td></tr>
+<tr><td>Clone: network blip, GitHub 5xx/429</td><td>Retried <code>CLONE_RETRIES</code> (3) times with growing back-off.</td></tr>
+<tr><td>Clone: bad URL, no access</td><td>Not retried. Recorded as <code>failure_kind: clone</code> with git's error; the next repo continues.</td></tr>
+<tr><td>No Maven/Gradle build found, bad subdir</td><td><code>failure_kind: detect</code>; next repo.</td></tr>
+<tr><td>Image can't be pulled (typo, registry down)</td><td>Failed as <code>image</code> after <code>IMAGE_PULL_GRACE_S</code> (180 s), with Kubernetes' message, instead of waiting for the 30 min timeout.</td></tr>
+<tr><td>Pod can't be scheduled (asks for more CPU than the node has)</td><td>Failed as <code>unschedulable</code> after <code>UNSCHEDULABLE_GRACE_S</code> (600 s), with the scheduler's reason.</td></tr>
+<tr><td>Kubernetes API hiccup</td><td><code>kubectl apply</code> retried 3x; the watch tolerates 12 failed reads in a row (1 min) before <code>infra</code>.</td></tr>
 <tr><td>Build fails / tests fail</td><td>Job fails (non-zero exit), result shows FAIL with the error excerpt; next repo continues.</td></tr>
 <tr><td>Build hangs</td><td><code>activeDeadlineSeconds</code> kills it; the orchestrator also gives up at timeout + 10 min.</td></tr>
 <tr><td>Out of memory</td><td><code>oom_kills</code> &gt; 0 in the result. The pod's memory limit is the knob.</td></tr>
 <tr><td>Spot reclaim of the build pod</td><td><code>podFailurePolicy: Ignore</code> on <code>DisruptionTarget</code> retries it; the report shows "N tries".</td></tr>
-<tr><td>Spot reclaim of the orchestrator</td><td>Same policy restarts it; repos with a result file are skipped.</td></tr>
+<tr><td>Spot reclaim of the orchestrator</td><td>Same policy restarts it; repos that already passed are skipped, failed ones are tried again.</td></tr>
 <tr><td>Maven Central rate limit (HTTP 429)</td><td>Shows up as a failed download (Gradle may say "Could not find"). We hit this from the sandbox. The fix is a mirror; see section 11.</td></tr>
-<tr><td>Laptop dies mid-run</td><td>The trap can't run: use <code>bin/down.sh</code> then <code>bin/leftovers.sh</code>.</td></tr>
+<tr><td>Driver dies mid-run (laptop off, Claude session ended)</td><td>The <code>finally</code> can't run: run <code>jbp down</code> (it verifies) or <code>jbp leftovers</code>. When Claude drives, it also schedules an independent leftovers check after the run.</td></tr>
 </table></div>
 
 <!-- 10 -->
 <h2 id="local"><span class="n">10</span>Local modes</h2>
 <ul>
-<li><b><code>bin/local-docker.sh</code></b>: no Kubernetes. The same orchestrator.sh runs on your machine with <code>LAUNCHER=docker</code>. Each build is a <code>docker run</code> of the same image and build.sh with <code>--cpus</code>/<code>--memory</code> set to the pod limits, and a local folder stands in for the PVC. It tests detection, images, builds and the report for free. This is how the pipeline was tested so far.</li>
-<li><b><code>bin/local-kind.sh up|run|down</code></b>: a real Kubernetes path on kind (Docker in Docker). It runs the exact manifests, RBAC and Job polling, with Docker Hub images and 1 CPU / 3 Gi pods. This is the free rehearsal before AWS.</li>
+<li><b><code>jbp local-docker</code></b>: no Kubernetes. The same orchestrator.py runs on your machine with <code>LAUNCHER=docker</code>. Each build is a <code>docker run</code> of the same image and build.sh with <code>--cpus</code>/<code>--memory</code> set to the pod limits, and a local folder stands in for the PVC. It tests detection, images, builds and the report for free. This is how the pipeline was tested so far.</li>
+<li><b><code>jbp local-kind up|run|down</code></b>: a real Kubernetes path on kind (Docker in Docker). It runs the exact manifests, RBAC and Job polling, with Docker Hub images and 1 CPU / 3 Gi pods. This is the free rehearsal before AWS.</li>
 </ul>
 
 <!-- 11 -->
@@ -310,7 +331,7 @@ IPv4           0.4 h × $0.005                                = $0.002
   junit-par     MAVEN_ARGS_EXTRA=-Djunit.jupiter.execution.parallel.enabled=true
   cpu1          BUILD_CPU=1
   cpu4          BUILD_CPU=4   BUILD_MEM=8Gi
-bin/experiment.sh             # up once -> warm-up run -> for rep in 1..3: shuffle variants, run.sh each -> down
+jbp experiment                # up once -> warm-up run -> for rep in 1..3: shuffle variants, run each -> down
 report/compare.py             # merges runs/*/summary.csv -> comparison.html</code></pre>
 <p>Each variant reuses the existing runner with different environment variables, so nothing in the orchestrator changes. <code>SKIP_DONE=0</code> and a fresh <code>results/</code> per variant keep runs separate.</p>
 
@@ -328,7 +349,7 @@ report/compare.py             # merges runs/*/summary.csv -> comparison.html</co
 <!-- 12 -->
 <h2 id="limits"><span class="n">12</span>Known limits + open questions</h2>
 <ul>
-<li><b>The Kubernetes path hasn't run yet.</b> kind can't start in the cloud sandbox used for development, so testing so far is local Docker plus static checks of the rendered YAML. First step: <code>bin/local-kind.sh</code> on a Mac, then one AWS run.</li>
+<li><b>The Kubernetes path hasn't run yet.</b> kind can't start in the cloud sandbox used for development, so testing so far is local Docker plus static checks of the rendered YAML. First step: <code>jbp local-kindh</code> on a Mac, then one AWS run.</li>
 <li><b>Single node / RWO volume.</b> Parallel builds have to share one node. Spreading across nodes needs EFS (ReadWriteMany) or a volume per build.</li>
 <li><b>Private repos</b> need a token Secret mounted into the orchestrator (not wired yet).</li>
 <li><b>Maven Central rate limits</b>: at scale, put CodeArtifact or Nexus in front and point <code>settings.xml</code> mirrors at it.</li>
