@@ -26,8 +26,6 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector: {matchLabels: {app: jbp-orchestrator}}
               topologyKey: kubernetes.io/hostname
-      tolerations:
-        - {key: jbp/build, operator: Exists, effect: NoSchedule}
       containers:
         - name: build
           image: __IMAGE__
