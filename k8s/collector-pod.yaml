@@ -1,0 +1,14 @@
+# Short-lived pod used by bin/run.sh to copy results off the PVC.
+apiVersion: v1
+kind: Pod
+metadata: {name: jbp-collector, namespace: __NAMESPACE__, labels: {app: jbp-orchestrator}}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: c
+      image: __ORCH_IMAGE__
+      command: ["sleep", "900"]
+      resources: {requests: {cpu: 50m, memory: 64Mi}}
+      volumeMounts: [{name: workspace, mountPath: /workspace}]
+  volumes:
+    - {name: workspace, persistentVolumeClaim: {claimName: jbp-workspace}}

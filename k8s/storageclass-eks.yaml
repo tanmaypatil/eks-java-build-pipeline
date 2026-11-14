@@ -1,0 +1,10 @@
+# gp3 for the workspace. Volumes are tagged so bin/down.sh can find any that leak.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: jbp-gp3}
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+parameters:
+  type: gp3
+  tagSpecification_1: "jbp-cluster=__CLUSTER_NAME__"

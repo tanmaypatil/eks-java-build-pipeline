@@ -1,0 +1,12 @@
+# name             url                                                       ref(-=default)  subdir(-=root)  overrides (tool=maven|gradle java=N)
+# One repo per line. Each is cloned (one by one) onto the shared PVC, then built in a matching image.
+# Synthetic benchmark projects (Maven, Java 17/21/25, 30 -> 6000 classes)
+perf-p1-tiny-j17     https://github.com/tanmaypatil/perf-p1-tiny-j17.git    -   -
+perf-p2-small-j21    https://github.com/tanmaypatil/perf-p2-small-j21.git   -   -
+perf-p3-medium-j25   https://github.com/tanmaypatil/perf-p3-medium-j25.git  -   -
+perf-p4-medium-j17   https://github.com/tanmaypatil/perf-p4-medium-j17.git  -   -
+perf-p5-large-j21    https://github.com/tanmaypatil/perf-p5-large-j21.git   -   -
+perf-p6-xlarge-j25   https://github.com/tanmaypatil/perf-p6-xlarge-j25.git  -   -
+# Real-world repos (Maven wrapper, Gradle wrapper, subdir)
+petclinic            https://github.com/spring-projects/spring-petclinic.git  -  -
+rest-svc-gradle      https://github.com/spring-guides/gs-rest-service.git     -  complete  tool=gradle

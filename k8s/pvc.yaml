@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: jbp-workspace, namespace: __NAMESPACE__}
+spec:
+  accessModes: [ReadWriteOnce]
+  __STORAGE_CLASS_LINE__
+  resources: {requests: {storage: __PVC_SIZE__}}
