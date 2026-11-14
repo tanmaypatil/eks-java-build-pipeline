@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Build Pipeline Architecture</title>
+<style>
+:root{--bg:#fbfaf8;--fg:#1d1d1b;--mute:#65645f;--line:#e2e0d9;--card:#fff;--accent:#2f6f9f;--ok:#2f7d5b;--warn:#a5671b;--box:#f1efe9;--code:#f4f2ec}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#151514;--fg:#ebeae6;--mute:#9b9994;--line:#2f2e2b;--card:#1e1e1c;--accent:#7fb2dc;--ok:#5fb98f;--warn:#e0a35a;--box:#262623;--code:#232321}}
+:root[data-theme="dark"]{--bg:#151514;--fg:#ebeae6;--mute:#9b9994;--line:#2f2e2b;--card:#1e1e1c;--accent:#7fb2dc;--ok:#5fb98f;--warn:#e0a35a;--box:#262623;--code:#232321}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:32px 16px 80px}
+h1{font-size:28px;margin:0 0 6px;line-height:1.2}
+h2{font-size:21px;margin:56px 0 8px;padding-top:12px;border-top:1px solid var(--line)}
+h2 .n{color:var(--accent);margin-right:8px}
+h3{font-size:16px;margin:24px 0 6px}
+p,li{max-width:76ch}
+.lede{color:var(--mute);font-size:16px;margin:0 0 20px}
+nav ol{columns:2;column-gap:32px;padding-left:20px;margin:0}
+nav a,a{color:var(--accent)}
+nav{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px}
+pre{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:10px 0 4px;font-size:14px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:600;font-size:13px}
+.wrap{overflow-x:auto}
+.note{border-left:3px solid var(--warn);background:var(--card);padding:10px 14px;border-radius:0 8px 8px 0;margin:14px 0}
+.why{border-left:3px solid var(--ok);background:var(--card);padding:10px 14px;border-radius:0 8px 8px 0;margin:14px 0}
+.status{font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--box);color:var(--mute);vertical-align:middle}
+.status.done{color:var(--ok)}.status.plan{color:var(--warn)}
+svg.d{width:100%;height:auto;margin:10px 0}
+svg.d text{fill:var(--fg);font:13px system-ui,sans-serif}
+svg.d .m{fill:var(--mute);font-size:12px}
+svg.d rect.b{fill:var(--card);stroke:var(--line);stroke-width:1.5}
+svg.d rect.a{fill:var(--box);stroke:var(--accent);stroke-width:1.5}
+svg.d path,svg.d line{stroke:var(--mute);stroke-width:1.5;fill:none}
+svg.d .arr{fill:var(--mute)}
+</style>
+</head>
+<body><main>
+
+<h1>Ephemeral EKS Java build pipeline: architecture</h1>
+<p class="lede">How a run works from start to finish: creating the cluster, running the orchestrator, detecting the Java version, the build Job, the report, the cost forecast, and the planned experiments that optimise build time. Every section links to the file that implements it.</p>
+
+<nav><ol>
+<li><a href="#overview">The whole run</a></li>
+<li><a href="#cluster">Cluster lifecycle (up / down)</a></li>
+<li><a href="#k8s">Kubernetes objects</a></li>
+<li><a href="#orchestrator">Orchestrator Job</a></li>
+<li><a href="#detect">Java + build tool detection</a></li>
+<li><a href="#build">Build Job</a></li>
+<li><a href="#collect">Results collection + report</a></li>
+<li><a href="#cost">Cost model + forecast</a></li>
+<li><a href="#failure">Failure handling</a></li>
+<li><a href="#local">Local modes</a></li>
+<li><a href="#optimise">Optimisation experiment design</a></li>
+<li><a href="#limits">Known limits + open questions</a></li>
+</ol></nav>
+
+<!-- 1 -->
+<h2 id="overview"><span class="n">1</span>The whole run</h2>
+<p>One command, <code>bin/all.sh</code>, runs four phases. Your laptop, or any machine with AWS credentials, only drives the run. Every Java build happens inside the cluster.</p>
+
+<svg class="d" viewBox="0 0 940 330" role="img" aria-label="Run phases">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="arr"/></marker></defs>
+  <rect class="b" x="10" y="20" width="200" height="70" rx="8"/><text x="24" y="46">1. bin/up.sh</text><text x="24" y="68" class="m">eksctl: EKS + spot node</text><text x="24" y="84" class="m">~15-20 min</text>
+  <rect class="a" x="250" y="20" width="200" height="70" rx="8"/><text x="264" y="46">2. bin/run.sh</text><text x="264" y="68" class="m">orchestrator + build Jobs</text><text x="264" y="84" class="m">depends on repos</text>
+  <rect class="b" x="490" y="20" width="200" height="70" rx="8"/><text x="504" y="46">3. report</text><text x="504" y="68" class="m">kubectl cp results</text><text x="504" y="84" class="m">make_report.py, ~1 min</text>
+  <rect class="b" x="730" y="20" width="200" height="70" rx="8"/><text x="744" y="46">4. bin/down.sh</text><text x="744" y="68" class="m">ns delete, cluster delete</text><text x="744" y="84" class="m">~10 min, always runs</text>
+  <line x1="210" y1="55" x2="248" y2="55" marker-end="url(#ar)"/><line x1="450" y1="55" x2="488" y2="55" marker-end="url(#ar)"/><line x1="690" y1="55" x2="728" y2="55" marker-end="url(#ar)"/>
+  <rect class="b" x="250" y="140" width="680" height="180" rx="10"/>
+  <text x="266" y="164">Inside the cluster (namespace jbp, one spot node)</text>
+  <rect class="a" x="270" y="180" width="190" height="88" rx="8"/><text x="284" y="204">Orchestrator Job</text><text x="284" y="224" class="m">alpine/k8s</text><text x="284" y="242" class="m">git clone, detect,</text><text x="284" y="258" class="m">kubectl apply Job</text>
+  <rect class="b" x="500" y="180" width="170" height="88" rx="8"/><text x="514" y="204">PVC jbp-workspace</text><text x="514" y="224" class="m">EBS gp3, RWO</text><text x="514" y="242" class="m">repos/ cache/ results/</text>
+  <rect class="a" x="710" y="180" width="200" height="88" rx="8"/><text x="724" y="204">Build Job per repo</text><text x="724" y="224" class="m">maven / temurin / gradle</text><text x="724" y="242" class="m">image picked by Java ver.</text><text x="724" y="258" class="m">build.sh</text>
+  <line x1="460" y1="224" x2="498" y2="224" marker-end="url(#ar)"/><line x1="670" y1="224" x2="708" y2="224"/><line x1="700" y1="224" x2="672" y2="224" marker-end="url(#ar)"/>
+  <path d="M365 268 C365 300, 810 300, 810 271" marker-end="url(#ar)"/><text x="530" y="310" class="m">creates + waits on</text>
+  <line x1="350" y1="90" x2="350" y2="138" marker-end="url(#ar)"/>
+</svg>
+
+<p>The flow from your terminal:</p>
+<pre><code>bin/all.sh
+  trap teardown EXIT INT TERM          # teardown is guaranteed from here on
+  stamp up_start  -> bin/up.sh  -> stamp up_end
+  bin/run.sh                           # stamps run_start, builds_end, run_end
+  (exit) -> stamp down_start -> bin/down.sh -> stamp down_end -> report re-rendered with real teardown time</code></pre>
+<p>Each <code>stamp</code> appends <code>phase=epoch_seconds</code> to <code>runs/&lt;RUN_ID&gt;/phases.env</code>. Those timestamps feed the measured cost in section 8.</p>
+
+<!-- 2 -->
+<h2 id="cluster"><span class="n">2</span>Cluster lifecycle <span class="status done">built</span></h2>
+<p>Files: <a href="../bin/up.sh"><code>bin/up.sh</code></a>, <a href="../bin/down.sh"><code>bin/down.sh</code></a>, <a href="../bin/leftovers.sh"><code>bin/leftovers.sh</code></a>, settings in <a href="../config/run.env"><code>config/run.env</code></a>.</p>
+
+<h3>Creation (<code>bin/up.sh</code>)</h3>
+<ol>
+<li><b>Pick the Kubernetes version.</b> With <code>K8S_VERSION=auto</code>, it calls <code>aws eks describe-cluster-versions --version-status STANDARD_SUPPORT</code> and takes the newest. A version in extended support bills the control plane at $0.60/h instead of $0.10/h, so this check protects the budget.</li>
+<li><b>Render an eksctl <code>ClusterConfig</code></b> as a heredoc and run <code>eksctl create cluster -f</code>. eksctl creates two CloudFormation stacks: the cluster (VPC, subnets, IAM roles, control plane) and the node group.</li>
+<li><b>Point kubectl at the cluster</b> with <code>aws eks update-kubeconfig</code>.</li>
+<li><b>Apply the <code>jbp-gp3</code> StorageClass</b>, so the workspace PVC gets an EBS gp3 volume.</li>
+</ol>
+<p>If a cluster with that name already exists, up.sh reuses it. That makes <code>--keep</code> plus repeated runs cheap.</p>
+
+<h3>What gets created, and why each choice</h3>
+<div class="wrap"><table>
+<tr><th>Piece</th><th>Choice</th><th>Why</th></tr>
+<tr><td>Control plane</td><td>EKS, newest standard-support version</td><td>Same managed Kubernetes as production EKS; close to OpenShift for Job/Pod semantics. $0.10/h.</td></tr>
+<tr><td>Networking</td><td>eksctl VPC, <code>nat.gateway: Disable</code>, nodes in <b>public</b> subnets</td><td>A NAT gateway costs ~$0.045/h plus $0.045/GB. With public subnets, nodes reach GitHub, Maven Central and the image registries directly through a public IPv4 ($0.005/h).</td></tr>
+<tr><td>Nodes</td><td>1 managed node group, <code>spot: true</code>, AL2023, 6 instance types of the 4 vCPU / 16 GiB class</td><td>Spot is ~60-70% cheaper than on-demand. Listing several types lets AWS pick whichever pool has capacity. One node is enough because builds run one at a time and the PVC is single-node anyway.</td></tr>
+<tr><td>Node disk</td><td>40 GB gp3</td><td>Fits the build images (~0.5 GB each, up to 4-5 per run) with room to spare.</td></tr>
+<tr><td>Storage</td><td>aws-ebs-csi-driver add-on, IRSA via <code>wellKnownPolicies.ebsCSIController</code></td><td>Needed for a PVC on EKS. OIDC lets the driver's pod assume an IAM role without node-wide permissions.</td></tr>
+<tr><td>Logging</td><td>Control-plane logs off (eksctl default)</td><td>CloudWatch ingestion costs money and we don't need it.</td></tr>
+<tr><td>Tags</td><td><code>project=java-build-perf</code>, <code>jbp-ephemeral=true</code>; EBS volumes get <code>jbp-cluster=&lt;name&gt;</code></td><td>Lets you find leftovers and attribute cost.</td></tr>
+</table></div>
+<p class="why"><b>Why not Karpenter?</b> Karpenter is great for long-lived clusters with changing load. Installing it adds a Helm release, IAM roles, an SQS queue for interruptions and a few minutes per run. For a cluster that lives an hour with a fixed node count, a managed spot node group gives the same price with fewer moving parts. It can come back once runs need several node sizes in one cluster.</p>
+
+<h3>Teardown (<code>bin/down.sh</code>)</h3>
+<ol>
+<li><b>Delete the <code>jbp</code> namespace first and wait.</b> This deletes the PVC, so the EBS CSI driver deletes its volume while the driver still exists. If the cluster goes first, the volume is orphaned and keeps billing.</li>
+<li><code>eksctl delete cluster --wait --disable-nodegroup-eviction</code>. It deletes both stacks; skipping eviction saves minutes because nothing on the node needs a graceful drain.</li>
+<li><code>bin/leftovers.sh</code> lists anything still billing: the cluster, <code>eksctl-&lt;name&gt;-*</code> stacks, and volumes tagged <code>jbp-cluster</code>. <code>--delete</code> removes orphaned volumes.</li>
+</ol>
+<p>Teardown runs from a shell <code>trap</code> in <code>all.sh</code>, so it fires on success, on any failure (<code>set -e</code>), and on Ctrl-C. It doesn't fire if the laptop itself loses power. That is why <code>leftovers.sh</code> exists.</p>
+
+<!-- 3 -->
+<h2 id="k8s"><span class="n">3</span>Kubernetes objects <span class="status done">built</span></h2>
+<p>All live in the namespace <code>jbp</code> and are created by <a href="../bin/run.sh"><code>bin/run.sh</code></a>. Templates use <code>__VAR__</code> placeholders, filled from environment variables by a small Python <code>render()</code> in <a href="../bin/common.sh"><code>bin/common.sh</code></a>.</p>
+<div class="wrap"><table>
+<tr><th>Object</th><th>File</th><th>Purpose</th></tr>
+<tr><td>ConfigMap <code>jbp-scripts</code></td><td><code>scripts/*</code></td><td>orchestrator.sh, detect.sh and build.sh, mounted at <code>/scripts</code>. Stock images can then run our logic, so we don't need our own image or registry.</td></tr>
+<tr><td>ConfigMap <code>jbp-config</code></td><td><code>config/repos.txt</code>, <code>config/images.env</code></td><td>The repo list and the JDK-to-image map, mounted at <code>/config</code>.</td></tr>
+<tr><td>ConfigMap <code>jbp-templates</code></td><td><code>k8s/build-job.tpl.yaml</code></td><td>The build Job template the orchestrator fills in for each repo.</td></tr>
+<tr><td>ServiceAccount + Role + RoleBinding</td><td><code>k8s/rbac.yaml</code></td><td>The orchestrator may create, get, delete and watch Jobs, and read Pods, pod logs and events. Only in this namespace, nothing cluster-wide.</td></tr>
+<tr><td>PVC <code>jbp-workspace</code></td><td><code>k8s/pvc.yaml</code></td><td>30 Gi, ReadWriteOnce, <code>jbp-gp3</code>. Holds <code>repos/</code>, <code>cache/</code> (m2 + gradle) and <code>results/</code>.</td></tr>
+<tr><td>Job <code>jbp-orchestrator</code></td><td><code>k8s/orchestrator-job.yaml</code></td><td>Runs orchestrator.sh (section 4).</td></tr>
+<tr><td>Job <code>jbp-build-&lt;repo&gt;</code></td><td><code>k8s/build-job.tpl.yaml</code></td><td>One per repo (section 6).</td></tr>
+<tr><td>Pod <code>jbp-collector</code></td><td><code>k8s/collector-pod.yaml</code></td><td>Sleeps so <code>kubectl cp</code> can copy <code>/workspace/results</code> off the PVC.</td></tr>
+</table></div>
+<p class="note"><b>Volume binding.</b> The StorageClass uses <code>WaitForFirstConsumer</code>, so the EBS volume is created in the same availability zone as the node that runs the orchestrator. An EBS volume can't attach across zones.</p>
+
+<!-- 4 -->
+<h2 id="orchestrator"><span class="n">4</span>Orchestrator Job <span class="status done">built</span></h2>
+<p>File: <a href="../scripts/orchestrator.sh"><code>scripts/orchestrator.sh</code></a>. Image: <code>alpine/k8s:1.35.0</code>, which already has bash, git, jq, kubectl and python3, so nothing gets installed at runtime. It requests 100m CPU and 128 Mi, so it barely takes space from the builds.</p>
+
+<h3>Loop, for each line of <code>repos.txt</code></h3>
+<pre><code>name url ref subdir overrides
+ 1. skip if results/&lt;name&gt;.json exists          (SKIP_DONE=1: resume after a spot reclaim)
+ 2. git clone --depth 1 [--branch ref] url /workspace/repos/&lt;name&gt;   (timed: clone_s)
+    (a ref that isn't a branch/tag falls back to a full clone + checkout)
+ 3. detect.sh /workspace/repos/&lt;name&gt;/&lt;subdir&gt;  -> TOOL WRAPPER JAVA JAVA_SOURCE
+    overrides in column 5 win: tool=gradle java=21
+ 4. pick_jdk:   smallest of SUPPORTED_JDKS (11 17 21 25) that is &gt;= JAVA
+ 5. pick_image: maven -> MAVEN_IMAGE_&lt;jdk&gt;
+                gradle + gradlew -> JDK_IMAGE_&lt;jdk&gt;   (wrapper brings its own Gradle)
+                gradle, no wrapper -> GRADLE_IMAGE_&lt;jdk&gt;
+ 6. render build-job.tpl.yaml with sed, kubectl apply
+ 7. poll the Job every 5 s until succeeded&gt;=1 or condition Failed=True
+    (hard stop at BUILD_TIMEOUT_S + 10 min)
+ 8. save the Pod JSON (timeline) and the attempt count
+ 9. merge orchestrator facts + the build pod's &lt;name&gt;.build.json -> results/&lt;name&gt;.json</code></pre>
+
+<h3>Why it's built this way</h3>
+<ul>
+<li><b>Clone in the orchestrator, build in a separate pod.</b> That's your design. It also means build images need no git and no credentials, and clone time is measured apart from build time.</li>
+<li><b>One by one by default</b> (<code>MAX_PARALLEL=1</code>). Each build gets the whole CPU limit, so timings are clean and comparable between runs. With <code>MAX_PARALLEL=N</code>, cloning stays sequential while up to N builds run in the background (<code>wait -n</code>).</li>
+<li><b>Polling instead of <code>kubectl wait</code>.</b> <code>kubectl wait</code> can wait for one condition only, but here we need "Complete <i>or</i> Failed".</li>
+<li><b>Results as files on the PVC</b>, not in logs. They survive an orchestrator restart, which is what makes resume work.</li>
+</ul>
+
+<h3>The result record</h3>
+<p><code>results/&lt;repo&gt;.json</code> combines what the orchestrator knows (<code>url, commit, clone_s, repo_kb, tool, wrapper, java_required, java_source, jdk, image, pod_cpu, pod_mem, job_wall_s, ok</code>) with what the build pod measured (<code>rc, build_s, cpu_s, avg_cores, cpu_limit, throttled_pct, peak_mem_mib, oom_kills, tests, failures, errors, skipped, error_excerpt</code>).</p>
+
+<!-- 5 -->
+<h2 id="detect"><span class="n">5</span>Java + build tool detection <span class="status done">built</span></h2>
+<p>File: <a href="../scripts/detect.sh"><code>scripts/detect.sh</code></a>; tests: <a href="../test/detect_test.sh"><code>test/detect_test.sh</code></a> (17 cases).</p>
+<p><b>Tool:</b> <code>pom.xml</code> means Maven, otherwise any <code>build.gradle(.kts)</code> or <code>settings.gradle(.kts)</code> means Gradle. If a repo has both, Maven wins unless <code>tool=gradle</code> is set. If <code>mvnw</code> or <code>gradlew</code> is present, it's used.</p>
+<p><b>Java version, first hit wins:</b></p>
+<ol>
+<li>Explicit version files: <code>.java-version</code>, <code>.sdkmanrc</code>, <code>.tool-versions</code>, <code>.mvn/jdk</code></li>
+<li>Maven, taking the <b>highest</b> value across all module poms: <code>maven.compiler.release</code>, then compiler-plugin <code>&lt;release&gt;</code>, then <code>java.version</code> (Spring Boot), <code>maven.compiler.target</code>, <code>maven.compiler.source</code>, <code>&lt;target&gt;</code>, <code>.mvn/toolchains.xml</code></li>
+<li>Gradle: <code>JavaLanguageVersion.of(N)</code>, <code>jvmToolchain(N)</code>, <code>options.release</code>, <code>JavaVersion.VERSION_N</code>, <code>sourceCompatibility</code>, a <code>java.version</code> property</li>
+<li>Otherwise <code>DEFAULT_JAVA</code> (17)</li>
+</ol>
+<p>Values are normalised: <code>1.8</code> becomes 8, <code>17.0.2</code> becomes 17, <code>21.0.1-tem</code> becomes 21. The build runs on the <b>smallest supported JDK at or above</b> that number. Newer JDKs compile older targets through <code>--release N</code>, and picking the smallest keeps runtime behaviour, and Gradle-wrapper compatibility, closest to what the project expects.</p>
+<p class="note">This reads text with regexes; it doesn't evaluate the build. A version that comes from a parent POM in another repo, or that a Gradle script computes, falls back to the default. The report shows <code>java_source</code> so you can spot that, and <code>java=N</code> in repos.txt fixes it.</p>
+
+<!-- 6 -->
+<h2 id="build"><span class="n">6</span>Build Job <span class="status done">built</span></h2>
+<p>Files: <a href="../k8s/build-job.tpl.yaml"><code>k8s/build-job.tpl.yaml</code></a>, <a href="../scripts/build.sh"><code>scripts/build.sh</code></a>, <a href="../config/images.env"><code>config/images.env</code></a>.</p>
+<h3>Pod spec</h3>
+<ul>
+<li><b>Image</b> from <code>images.env</code>, by default pulled from <code>public.ecr.aws/docker/library/</code>. That's AWS's mirror of the Docker official images: no Docker Hub pull limit, and pulls stay inside AWS.</li>
+<li><b>Resources: request = limit</b> (default 2 CPU / 4 Gi). That gives Guaranteed QoS, matching how OpenShift build pods are usually sized, and the JVM sizes its heap and thread pools from the limit.</li>
+<li><b>podAffinity to the orchestrator's node</b>, because the EBS volume can attach to only one node.</li>
+<li><code>backoffLimit: 0</code>, <code>activeDeadlineSeconds: BUILD_TIMEOUT_S</code>, plus a <code>podFailurePolicy</code>. A pod killed by a spot reclaim (<code>DisruptionTarget</code>) is retried, and any non-zero exit fails the Job at once.</li>
+</ul>
+<h3>build.sh</h3>
+<pre><code>maven : mvn|./mvnw -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 $MAVEN_ARGS_EXTRA ${MAVEN_GOALS:-verify}
+gradle: gradle|./gradlew --no-daemon --console=plain $GRADLE_ARGS_EXTRA ${GRADLE_TASKS:-build}
+        (GRADLE_USER_HOME=/workspace/cache/gradle when DEP_CACHE=shared)</code></pre>
+<p>Measurements, all read from the container's own cgroup (v2 on EKS AL2023, v1 fallback):</p>
+<div class="wrap"><table>
+<tr><th>Metric</th><th>Source</th><th>What it tells you</th></tr>
+<tr><td><code>build_s</code></td><td>wall clock around the build command</td><td>The number we optimise.</td></tr>
+<tr><td><code>cpu_s</code>, <code>avg_cores</code></td><td><code>cpu.stat usage_usec</code> delta ÷ wall time</td><td>How much of the CPU limit the build actually used. Well below the limit means the build can't use the CPU (serial steps, I/O).</td></tr>
+<tr><td><code>throttled_pct</code>, <code>throttled_s</code></td><td><code>cpu.stat nr_throttled / nr_periods</code>, <code>throttled_usec</code></td><td>How often the CFS quota stopped the build. High means it wants more CPU than the limit allows.</td></tr>
+<tr><td><code>peak_mem_mib</code>, <code>oom_kills</code></td><td><code>memory.peak</code>, <code>memory.events</code></td><td>Memory headroom; the basis for right-sizing.</td></tr>
+<tr><td><code>tests / failures / errors / skipped</code></td><td>sums over <code>TEST-*.xml</code> from surefire, failsafe and Gradle</td><td>Correct feedback: an optimisation must not lose tests.</td></tr>
+<tr><td><code>error_excerpt</code></td><td>first lines of Gradle's "What went wrong" or Maven <code>[ERROR]</code></td><td>Shown in the report under failed repos.</td></tr>
+</table></div>
+<p>The full log goes to <code>results/&lt;repo&gt;.build.log</code>, and the report links it.</p>
+
+<!-- 7 -->
+<h2 id="collect"><span class="n">7</span>Results collection + report <span class="status done">built</span></h2>
+<p>When the orchestrator Job completes, <code>run.sh</code> starts <code>jbp-collector</code> on the same PVC, copies <code>/workspace/results</code> to <code>runs/&lt;RUN_ID&gt;/results</code>, saves <code>nodes.json</code> and <code>run.env</code>, and calls <a href="../report/make_report.py"><code>report/make_report.py</code></a>, which uses only the Python standard library.</p>
+<p>From each Pod's JSON the report also derives <code>queue_s</code> (pod created to scheduled: waiting for a node) and <code>startup_s</code> (scheduled to container started: image pull and volume attach). Output:</p>
+<ul>
+<li><code>report.html</code>: a single file with summary tiles, a stacked timeline per repo (clone, wait + pull, build), a per-repo table, a cost section and the run settings. Light and dark mode.</li>
+<li><code>summary.csv</code>: one row per repo, for comparing runs in a spreadsheet or notebook.</li>
+</ul>
+<p>A sample from a local run is in <a href="../samples/local-docker-report.html"><code>samples/local-docker-report.html</code></a>.</p>
+
+<!-- 8 -->
+<h2 id="cost"><span class="n">8</span>Cost model + forecast <span class="status done">built</span></h2>
+<p>File: <code>report/make_report.py</code> (<code>cost()</code>); prices in <code>config/run.env</code>.</p>
+<h3>Billed items</h3>
+<div class="wrap"><table>
+<tr><th>Item</th><th>Default price</th><th>Billed for</th></tr>
+<tr><td>EKS control plane</td><td><code>PRICE_EKS_HOUR=0.10</code></td><td>The whole window from create start to delete end.</td></tr>
+<tr><td>Spot node(s)</td><td><code>PRICE_NODE_HOUR=0.07</code></td><td>From node launch to termination, times <code>NODE_COUNT</code>.</td></tr>
+<tr><td>EBS</td><td><code>PRICE_EBS_GB_MONTH=0.08</code></td><td>(nodes × node disk + PVC) GB × hours ÷ 730.</td></tr>
+<tr><td>Public IPv4</td><td><code>PRICE_IPV4_HOUR=0.005</code></td><td>One per node, while it lives.</td></tr>
+<tr><td>Not billed</td><td>none</td><td>CloudFormation, data in, ECR Public pulls in-region, GitHub clones.</td></tr>
+</table></div>
+
+<h3>Measured cost (a run through <code>bin/all.sh</code>)</h3>
+<pre><code>control_plane_s = down_end - up_start
+node_s          = (down_start - up_end) + 6 min + 3 min
+                  # nodes start ~6 min before up.sh returns, and die ~3 min into teardown
+cost = 0.10 × cp_h + 0.07 × nodes × node_h + EBS + IPv4</code></pre>
+
+<h3>Forecast (any run, even local Docker)</h3>
+<p>The work part is taken from the run itself (pipeline wall time, or the sum of clone + build when that's missing). Fixed overhead is added for an ephemeral EKS run:</p>
+<pre><code>control_plane_s = 18 min (up) + work + 3 min (collect) + 12 min (down)
+node_s          =  6 min      + work + 3 min           +  3 min</code></pre>
+<p>Worked example, from the local test of your 6 repos plus 2 public ones (11:47 of work):</p>
+<pre><code>control plane  (18 + 11.8 + 3 + 12) min = 44.8 min × $0.10/h = $0.075
+spot node      ( 6 + 11.8 + 3 +  3) min = 23.8 min × $0.07/h = $0.028
+EBS            (40 + 30) GB × 0.4 h × $0.08/730              = $0.003
+IPv4           0.4 h × $0.005                                = $0.002
+                                                        total ≈ $0.11</code></pre>
+<p class="why"><b>What this tells us:</b> about 70% of a small run is control plane time, and most of that is the ~30 minutes of create and delete. For short runs the cheapest lever is to batch more repos into one cluster, or keep it up with <code>--keep</code> across several experiment runs. Faster builds matter more once the work is longer than the overhead.</p>
+<p class="note">Spot prices change by region and hour. The defaults are typical us-east-1 numbers; check the EC2 spot pricing page and set <code>PRICE_NODE_HOUR</code>. The overhead constants (18/12/6/3 min) are estimates until the first real run measures them. Once it does, the measured cost replaces the forecast.</p>
+
+<!-- 9 -->
+<h2 id="failure"><span class="n">9</span>Failure handling</h2>
+<div class="wrap"><table>
+<tr><th>What fails</th><th>What happens</th></tr>
+<tr><td>Clone (bad URL, no access)</td><td>Recorded with <code>stage: clone</code> and git's error; the next repo continues.</td></tr>
+<tr><td>Build fails / tests fail</td><td>Job fails (non-zero exit), result shows FAIL with the error excerpt; next repo continues.</td></tr>
+<tr><td>Build hangs</td><td><code>activeDeadlineSeconds</code> kills it; the orchestrator also gives up at timeout + 10 min.</td></tr>
+<tr><td>Out of memory</td><td><code>oom_kills</code> &gt; 0 in the result. The pod's memory limit is the knob.</td></tr>
+<tr><td>Spot reclaim of the build pod</td><td><code>podFailurePolicy: Ignore</code> on <code>DisruptionTarget</code> retries it; the report shows "N tries".</td></tr>
+<tr><td>Spot reclaim of the orchestrator</td><td>Same policy restarts it; repos with a result file are skipped.</td></tr>
+<tr><td>Maven Central rate limit (HTTP 429)</td><td>Shows up as a failed download (Gradle may say "Could not find"). We hit this from the sandbox. The fix is a mirror; see section 11.</td></tr>
+<tr><td>Laptop dies mid-run</td><td>The trap can't run: use <code>bin/down.sh</code> then <code>bin/leftovers.sh</code>.</td></tr>
+</table></div>
+
+<!-- 10 -->
+<h2 id="local"><span class="n">10</span>Local modes</h2>
+<ul>
+<li><b><code>bin/local-docker.sh</code></b>: no Kubernetes. The same orchestrator.sh runs on your machine with <code>LAUNCHER=docker</code>. Each build is a <code>docker run</code> of the same image and build.sh with <code>--cpus</code>/<code>--memory</code> set to the pod limits, and a local folder stands in for the PVC. It tests detection, images, builds and the report for free. This is how the pipeline was tested so far.</li>
+<li><b><code>bin/local-kind.sh up|run|down</code></b>: a real Kubernetes path on kind (Docker in Docker). It runs the exact manifests, RBAC and Job polling, with Docker Hub images and 1 CPU / 3 Gi pods. This is the free rehearsal before AWS.</li>
+</ul>
+
+<!-- 11 -->
+<h2 id="optimise"><span class="n">11</span>Optimisation experiment design <span class="status plan">designed, not built yet</span></h2>
+<p>Goal: find settings that cut build time, cost per build, or both, <b>without changing the test result</b>. That's the "correct feedback" requirement. The runner exists already (one run = one configuration). This section designs the layer that runs several configurations and compares them.</p>
+
+<h3>Method</h3>
+<ol>
+<li><b>Baseline.</b> Plain <code>mvn -B verify</code>, 2 CPU / 4 Gi, JVM defaults, dependency cache warm. Warm means a first run fills the cache and isn't measured; we're measuring build work, not Maven Central's speed.</li>
+<li><b>One factor at a time.</b> Change a single setting per variant, against the same baseline, on the same node.</li>
+<li><b>Repeat and randomise.</b> 3 repetitions per variant × repo, with variant order shuffled each round. Neighbour noise and spot node differences then spread evenly rather than biasing one variant.</li>
+<li><b>Correctness gate.</b> A variant counts only if every repo passes with the <b>same test count</b> as the baseline. Fewer tests means it skipped work (e.g. a cache hit with no surefire reports, as seen in the earlier benchmark) and is flagged, not counted as faster.</li>
+<li><b>Combine the winners</b> and re-measure the combination, since gains don't always add up.</li>
+<li><b>Re-run the winner cold</b> (<code>DEP_CACHE=none</code>), the case a fresh OpenShift build pod actually sees.</li>
+</ol>
+
+<h3>Factors (from the earlier benchmark and the literature review)</h3>
+<div class="wrap"><table>
+<tr><th>#</th><th>Factor</th><th>Levels</th><th>How it's applied</th><th>Expectation</th></tr>
+<tr><td>F1</td><td>Maven module parallelism</td><td>off, <code>-T1C</code>, <code>-T2</code></td><td><code>MAVEN_ARGS_EXTRA</code></td><td>Up to −45% on multi-module repos (p3-p6); none on single-module.</td></tr>
+<tr><td>F2</td><td>JIT tiering</td><td>default, <code>-XX:TieredStopAtLevel=1</code></td><td><code>MAVEN_OPTS</code> (new env passthrough)</td><td>Faster for short-lived JVMs like javac and plugins.</td></tr>
+<tr><td>F3</td><td>Test execution</td><td>default, forkCount=1 reuse + JUnit 5 parallel</td><td><code>-Djunit.jupiter.execution.parallel.enabled=true</code> etc.</td><td>Big win on test-heavy repos with sleep/IO tests.</td></tr>
+<tr><td>F4</td><td>Pod CPU</td><td>1, 2, 4</td><td><code>BUILD_CPU</code></td><td>Time drops until <code>avg_cores</code> stops rising; the knee is the right size.</td></tr>
+<tr><td>F5</td><td>Pod memory</td><td>2 Gi, 4 Gi, 8 Gi</td><td><code>BUILD_MEM</code></td><td>Under 1792 MB the JVM picks SerialGC; below that, slower.</td></tr>
+<tr><td>F6</td><td>GC</td><td>default, ParallelGC</td><td><code>MAVEN_OPTS</code></td><td>Small gain on throughput-bound builds.</td></tr>
+<tr><td>F7</td><td>Dependency cache</td><td>none, shared on PVC, restored from S3/EBS snapshot</td><td><code>DEP_CACHE</code> + new restore step</td><td>Removes download time and the 429 risk.</td></tr>
+<tr><td>F8</td><td>Image pull</td><td>cold, pre-pulled (DaemonSet / AMI)</td><td>new pre-pull step</td><td>Removes ~10-30 s of <code>startup_s</code> per new image.</td></tr>
+<tr><td>F9</td><td>Build daemon</td><td>mvn, mvnd</td><td>new image variant</td><td>Mostly helps repeated builds; less in a one-shot pod.</td></tr>
+</table></div>
+
+<h3>What will be built for this</h3>
+<pre><code>config/experiments.txt        # one variant per line: name  KEY=VALUE ...
+  baseline
+  t1c           MAVEN_ARGS_EXTRA=-T1C
+  tiered1       MAVEN_OPTS=-XX:TieredStopAtLevel=1
+  junit-par     MAVEN_ARGS_EXTRA=-Djunit.jupiter.execution.parallel.enabled=true
+  cpu1          BUILD_CPU=1
+  cpu4          BUILD_CPU=4   BUILD_MEM=8Gi
+bin/experiment.sh             # up once -> warm-up run -> for rep in 1..3: shuffle variants, run.sh each -> down
+report/compare.py             # merges runs/*/summary.csv -> comparison.html</code></pre>
+<p>Each variant reuses the existing runner with different environment variables, so nothing in the orchestrator changes. <code>SKIP_DONE=0</code> and a fresh <code>results/</code> per variant keep runs separate.</p>
+
+<h3>Comparison report (per repo × variant)</h3>
+<ul>
+<li>Median <code>build_s</code> and its range across reps; % change vs baseline. A change smaller than the baseline's own spread is called "no difference".</li>
+<li><b>Cost per build</b> = <code>build_s × BUILD_CPU / node vCPUs × node $/h</code>. The share of the node the pod reserves, which is how OpenShift capacity is paid for.</li>
+<li>Correctness: test count equal to baseline (✓/✗), pass/fail.</li>
+<li><code>avg_cores</code>, <code>throttled_pct</code> and <code>peak_mem_mib</code>, to explain <i>why</i> a variant won or lost.</li>
+</ul>
+
+<h3>Budget</h3>
+<p>6 repos × ~8 min of work per variant pass × 6 variants × 3 reps ≈ 2.4 h of builds in one cluster. That's about 3 h of control plane and node time, roughly <b>$0.50 to $0.60</b> for the whole matrix on spot, because the cluster is created only once.</p>
+
+<!-- 12 -->
+<h2 id="limits"><span class="n">12</span>Known limits + open questions</h2>
+<ul>
+<li><b>The Kubernetes path hasn't run yet.</b> kind can't start in the cloud sandbox used for development, so testing so far is local Docker plus static checks of the rendered YAML. First step: <code>bin/local-kind.sh</code> on a Mac, then one AWS run.</li>
+<li><b>Single node / RWO volume.</b> Parallel builds have to share one node. Spreading across nodes needs EFS (ReadWriteMany) or a volume per build.</li>
+<li><b>Private repos</b> need a token Secret mounted into the orchestrator (not wired yet).</li>
+<li><b>Maven Central rate limits</b>: at scale, put CodeArtifact or Nexus in front and point <code>settings.xml</code> mirrors at it.</li>
+<li><b>OpenShift differences</b>: OCP runs pods with a random UID (our stock images assume root for <code>/workspace</code>), uses Routes/SCCs, and often uses BuildConfigs or Tekton. Porting will need <code>fsGroup</code> or a writable-dir setup in the build pod.</li>
+<li><b>Fixed overhead constants</b> in the forecast are estimates until the first EKS run measures them.</li>
+</ul>
+
+</main></body></html>

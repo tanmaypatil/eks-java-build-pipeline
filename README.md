@@ -19,6 +19,8 @@ bin/all.sh
   └─ bin/down.sh      delete namespace (frees EBS) -> eksctl delete cluster -> leftover check  ~10 min
 ```
 
+Full architecture write-up: [`docs/architecture.html`](docs/architecture.html) (download and open in a browser).
+
 Teardown is in a `trap`, so it runs on failure and on Ctrl-C too.
 
 ## Quick start
