@@ -216,6 +216,11 @@ def cmd_down(cfg, r, args):
 
 def cmd_run(cfg, r, args):
     cfg["_context"] = run(["kubectl", "config", "current-context"], log=log, check=False).stdout.strip()
+    if not cfg["STORAGE_CLASS"] and run(["kubectl", "get", "storageclass", "jbp-gp3"], log=log, check=False,
+                                        timeout=30).returncode == 0:
+        # EKS has no default StorageClass, so a PVC without one stays Pending forever
+        log.info("using StorageClass jbp-gp3 (created by `jbp up`)")
+        cfg["STORAGE_CLASS"] = "jbp-gp3"
     ok = run_on_cluster(cfg, r, Path(args.repos))
     r.phase("REPORT")
     r.phase("REPORT", "ok" if make_report(r, cfg) else "failed")
