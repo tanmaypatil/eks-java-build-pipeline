@@ -46,8 +46,38 @@ def pick_version(cfg: Settings) -> str:
     return versions[-1]
 
 
-def eksctl_config(cfg: Settings, version: str) -> str:
-    types = ", ".join(f'"{t.strip()}"' for t in cfg["INSTANCE_TYPES"].split(",") if t.strip())
+def available_instance_types(cfg: Settings) -> list[str]:
+    """INSTANCE_TYPES minus the ones this region doesn't offer in at least 2 AZs.
+
+    eksctl drops every AZ that lacks *any* listed type, so one missing type (e.g. m7a in ap-south-1)
+    makes cluster creation fail with "only 0 zones discovered".
+    """
+    wanted = [t.strip() for t in cfg["INSTANCE_TYPES"].split(",") if t.strip()]
+    out = aws(cfg, "ec2", "describe-instance-type-offerings", "--location-type", "availability-zone",
+              "--filters", f"Name=instance-type,Values={','.join(wanted)}",
+              "--query", "InstanceTypeOfferings[].[InstanceType,Location]", "--output", "json", timeout=60).stdout
+    zones: dict[str, set] = {}
+    for itype, az in json.loads(out):
+        zones.setdefault(itype, set()).add(az)
+    keep = [t for t in wanted if len(zones.get(t, ())) >= 2]
+    dropped = [t for t in wanted if t not in keep]
+    if dropped:
+        log.warning("not offered in %s (in >= 2 AZs), skipping: %s", cfg["AWS_REGION"], ", ".join(dropped))
+    if not keep:
+        raise JbpError(f"none of INSTANCE_TYPES ({', '.join(wanted)}) is offered in {cfg['AWS_REGION']}")
+    # eksctl needs AZs that offer every listed type; keep only types sharing >= 2 AZs with the first one
+    common = set(zones[keep[0]])
+    result = []
+    for t in keep:
+        if len(common & zones[t]) >= 2:
+            common &= zones[t]
+            result.append(t)
+    return result
+
+
+def eksctl_config(cfg: Settings, version: str, instance_types: list[str] | None = None) -> str:
+    instance_types = instance_types or [t.strip() for t in cfg["INSTANCE_TYPES"].split(",") if t.strip()]
+    types = ", ".join(f'"{t}"' for t in instance_types)
     n = cfg.int("NODE_COUNT", 1)
     return f"""apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
@@ -89,11 +119,12 @@ def up(cfg: Settings, tracker: StageTracker | None = None) -> None:
         log.info("cluster %s already exists, reusing it", name)
     else:
         version = pick_version(cfg)
+        itypes = available_instance_types(cfg)
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
-            fh.write(eksctl_config(cfg, version))
+            fh.write(eksctl_config(cfg, version, itypes))
             path = fh.name
         log.info("creating cluster %s (EKS %s, %s x spot %s) - takes ~15-20 min",
-                 name, version, cfg["NODE_COUNT"], cfg["INSTANCE_TYPES"].split(",")[0] + "…")
+                 name, version, cfg["NODE_COUNT"], ", ".join(itypes))
         t0 = time.time()
         try:  # eksctl prints its own progress; each line goes into our log as it arrives
             run_streaming(["eksctl", "create", "cluster", "-f", path], log=log, prefix="eksctl: ", timeout=3600)
