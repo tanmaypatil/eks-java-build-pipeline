@@ -1,18 +1,27 @@
+# Identity and permissions for the orchestrator pod. It talks to the Kubernetes API (via kubectl) with
+# this ServiceAccount's token, so it can create and watch one build Job per repo.
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: jbp-orchestrator, namespace: __NAMESPACE__}
 ---
+# A Role (not a ClusterRole): every permission below applies ONLY inside the jbp namespace.
+# Least privilege: no secrets, no pods/exec, no direct pod creation, nothing cluster-wide.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: jbp-orchestrator, namespace: __NAMESPACE__}
 rules:
+  # Build Jobs: create/patch/get = `kubectl apply`; delete = clear a Job before re-running a repo
+  # or stop one that can never start; watch/list = follow its status.
   - apiGroups: [batch]
     resources: [jobs]
     verbs: [get, list, watch, create, delete, patch]
+  # Read-only on pods, their logs and events: used to spot ImagePullBackOff / Unschedulable early
+  # (orchestrator.py _pod_problem) and to save the final pod object for the report.
   - apiGroups: [""]
     resources: [pods, pods/log, events]
     verbs: [get, list, watch]
 ---
+# Grants the Role above to the ServiceAccount above.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: jbp-orchestrator, namespace: __NAMESPACE__}

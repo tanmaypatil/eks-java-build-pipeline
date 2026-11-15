@@ -139,7 +139,7 @@ svg.d a text{fill:var(--accent)}
 <main id="top">
 <h1>Ephemeral EKS Java build pipeline: code reference</h1>
 <p class="lede">A file-by-file, function-by-function guide to the code. <a href="architecture.html">architecture.html</a> explains the components and the reasons behind them; this page explains what each file contains, what each method does step by step, and how the files call each other.</p>
-<p class="meta"><span>Documents <b>main @ 6152cb0</b> (includes PR #4: region instance-type filter, <code>jbp-gp3</code> in a standalone <code>jbp run</code>)</span><span>Python 3 standard library only, plus bash</span><span>39 unit tests pass</span></p>
+<p class="meta"><span>Documents <b>main</b>, code as of <b>6152cb0</b> with line numbers updated for the inline comments (includes PR #4: region instance-type filter, <code>jbp-gp3</code> in a standalone <code>jbp run</code>)</span><span>Python 3 standard library only, plus bash</span><span>39 unit tests pass</span></p>
 
 <nav class="toc"><details><summary>Contents</summary><ul>
 <li><a href="#map">File map</a></li><li><a href="#flow">One run</a></li><li><a href="#jbp">jbp</a></li><li><a href="#cli">cli.py</a></li>
@@ -246,7 +246,7 @@ sys.exit(main())</code></pre>
 <div class="fn" id="cli-effective"><h4><code>effective_settings_text(cfg) → str</code><span class="loc">cli.py:61</span></h4>
 <p>Serialises the merged settings (file + env overrides) back to <code>KEY=value</code> lines. Written to <code>runs/&lt;id&gt;/settings.effective.env</code> and shipped to the pod in the <code>jbp-config</code> ConfigMap, so <code>BUILD_CPU=4 ./jbp run</code> actually reaches the orchestrator. The report also prefers this file over <code>config/settings.env</code>.</p></div>
 
-<div class="fn" id="cli-helpers"><h4><code>k() · render() · apply() · configmap()</code><span class="loc">cli.py:67-85</span></h4>
+<div class="fn" id="cli-helpers"><h4><code>k() · render() · apply() · configmap()</code><span class="loc">cli.py:67-87</span></h4>
 <ul>
 <li><code>k(cfg, *args, **kw)</code>: <code>kubectl -n &lt;NAMESPACE&gt; …</code> through <a href="#core-run"><code>run()</code></a>.</li>
 <li><code>render(path, values)</code>: reads a YAML template and replaces each <code>__KEY__</code> with <code>values[KEY]</code>. Plain string replacement, no templating engine. See <a href="#k8s">how templates are rendered</a>.</li>
@@ -254,7 +254,7 @@ sys.exit(main())</code></pre>
 <li><code>configmap(cfg, name, files)</code>: builds a ConfigMap with <code>kubectl create configmap --dry-run=client -o yaml --from-file=key=path…</code> and feeds the output to <code>apply</code>. The dry-run + apply trick turns "create" into "create or update".</li>
 </ul></div>
 
-<div class="fn" id="cli-run_on_cluster"><h4><code>run_on_cluster(cfg, r, repos) → bool</code><span class="loc">cli.py:88</span></h4>
+<div class="fn" id="cli-run_on_cluster"><h4><code>run_on_cluster(cfg, r, repos) → bool</code><span class="loc">cli.py:90</span></h4>
 <p>Deploys and runs one pipeline on the current kube context. Returns whether the orchestrator Job completed.</p>
 <ol>
 <li>Requires <code>kubectl</code>, logs the context. Builds the template <code>values</code>: all settings plus <code>RUN_ID</code> and <code>STORAGE_CLASS_LINE</code> (either <code>storageClassName: X</code> or an empty string, so the PVC falls back to the cluster default).</li>
@@ -266,7 +266,7 @@ sys.exit(main())</code></pre>
 <li><b>COLLECT</b>: <a href="#cli-collect"><code>collect()</code></a>, which runs even when the orchestrator failed, so partial results still reach the report.</li>
 </ol></div>
 
-<div class="fn" id="cli-follow"><h4><code>follow_orchestrator(cfg, r) → bool</code><span class="loc">cli.py:123</span></h4>
+<div class="fn" id="cli-follow"><h4><code>follow_orchestrator(cfg, r) → bool</code><span class="loc">cli.py:130</span></h4>
 <p>Shows the orchestrator's log live in the driver's console and decides when the run is over. Two loops run side by side:</p>
 <ul>
 <li><b>Background thread <code>stream()</code></b>: polls <code>pod_phase()</code> (a jsonpath query for the newest pod's phase and waiting reason). While the pod is Pending it logs the reason (e.g. <code>ContainerCreating</code>). Once it is Running/Succeeded/Failed it runs <code>kubectl logs -f job/jbp-orchestrator</code> through <a href="#core-stream"><code>run_streaming(raw=True)</code></a>, so the orchestrator's already-formatted lines print as-is with a <code>&nbsp;&nbsp;| </code> prefix. If the stream drops (API hiccup, pod restarted after a spot reclaim), the loop reconnects.</li>
@@ -274,17 +274,17 @@ sys.exit(main())</code></pre>
 </ul>
 <p>Finally joins the thread (30 s max) and sets the <code>done</code> event.</p></div>
 
-<div class="fn" id="cli-collect"><h4><code>collect(cfg, r, values)</code><span class="loc">cli.py:171</span></h4>
+<div class="fn" id="cli-collect"><h4><code>collect(cfg, r, values)</code><span class="loc">cli.py:180</span></h4>
 <ol>
 <li>Applies <a href="#k-coll">collector-pod.yaml</a>: a sleeping pod that mounts the PVC. The orchestrator pod has already exited, and a finished pod can't be <code>kubectl cp</code>'d from.</li>
 <li>Waits for it to be Ready (5 min), then <code>kubectl cp jbp-collector:/workspace/results runs/&lt;id&gt;/results</code> (2 retries).</li>
 <li>Deletes the pod without waiting, saves <code>kubectl get nodes -o json</code> to <code>nodes.json</code> (instance type, zone, capacity type for later analysis), and logs how many build logs came back.</li>
 </ol></div>
 
-<div class="fn" id="cli-make_report"><h4><code>make_report(r, cfg) → Path | None</code><span class="loc">cli.py:184</span></h4>
+<div class="fn" id="cli-make_report"><h4><code>make_report(r, cfg) → Path | None</code><span class="loc">cli.py:195</span></h4>
 <p>Writes <code>run.env</code> (run id, kube context and the settings worth showing: CPU, memory, parallelism, cache mode, extra args, instance types, node count, region), then runs <a href="#report"><code>report/make_report.py</code></a> as a <b>subprocess</b>. A bug in the report therefore can't break the driver, which matters because <code>cmd_all</code> calls it from the teardown path. Returns the report path, or None on failure (logged).</p></div>
 
-<div class="fn" id="cli-cmds"><h4><code>cmd_* command handlers</code><span class="loc">cli.py:201-349</span></h4>
+<div class="fn" id="cli-cmds"><h4><code>cmd_* command handlers</code><span class="loc">cli.py:214-371</span></h4>
 <p>All take <code>(cfg, r, args)</code>. They raise <a href="#core-errors"><code>JbpError</code></a> on failure, which <code>main()</code> turns into exit code 1.</p>
 <div class="wrap"><table>
 <tr><th>Function</th><th>Command</th><th>Logic</th></tr>
@@ -299,7 +299,7 @@ sys.exit(main())</code></pre>
 <tr><td><code>cmd_report</code></td><td><code>jbp report RUN_DIR</code></td><td>Builds a bare <code>Run</code> object pointing at an existing folder (via <code>Run.__new__</code>, so no new folder or tracker) and calls <code>make_report()</code>.</td></tr>
 </table></div></div>
 
-<div class="fn" id="cli-main"><h4><code>main(argv=None) → int</code><span class="loc">cli.py:352</span></h4>
+<div class="fn" id="cli-main"><h4><code>main(argv=None) → int</code><span class="loc">cli.py:374</span></h4>
 <ol>
 <li>Builds the argparse tree: global <code>-v/--verbose</code> and <code>--run-id</code>; subcommands with their options (<code>--repos</code> defaults to <code>config/repos.txt</code>).</li>
 <li><a href="#core-settings"><code>Settings.load()</code></a>.</li>
@@ -315,7 +315,7 @@ sys.exit(main())</code></pre>
 <div class="fn" id="core-time"><h4><code>now_ms() · utc_iso(ts=None) · fmt_duration(seconds)</code><span class="loc">jbpcore.py:28-40</span></h4>
 <p>Epoch milliseconds; an ISO-8601 UTC string like <code>2026-11-15T11:38:01Z</code>; and a human duration: <code>42s</code> under a minute, <code>m:ss</code> above, <code>-</code> for None.</p></div>
 
-<div class="fn" id="core-settings"><h4><code>read_env_file(path) · class Settings(dict) · load_images()</code><span class="loc">jbpcore.py:48-93</span></h4>
+<div class="fn" id="core-settings"><h4><code>read_env_file(path) · class Settings(dict) · load_images()</code><span class="loc">jbpcore.py:48-95</span></h4>
 <ul>
 <li><code>read_env_file</code>: parses <code>KEY=value</code> lines with the regex <code>_LINE</code>; skips blanks and <code>#</code> lines; strips one pair of matching quotes. A missing file returns <code>{}</code>.</li>
 <li><code>Settings.load(path=None, environ=None)</code>: reads <code>config/settings.env</code> (or <code>path</code>), then for every key <b>already in the file</b> takes the environment value if set. Only known keys can be overridden, so a stray env var can't sneak in. <code>environ</code> is injectable for tests.</li>
@@ -323,10 +323,10 @@ sys.exit(main())</code></pre>
 <li><code>load_images(path, registry)</code>: reads <code>images.env</code> and substitutes <code>{registry}</code> with <code>IMAGE_REGISTRY</code>.</li>
 </ul></div>
 
-<div class="fn" id="core-errors"><h4><code>JbpError · ConfigError · CommandError</code><span class="loc">jbpcore.py:98-110</span></h4>
+<div class="fn" id="core-errors"><h4><code>JbpError · ConfigError · CommandError</code><span class="loc">jbpcore.py:100-112</span></h4>
 <p><code>JbpError</code> is the base class for "expected" failures whose message is meant for a human; <code>cli.main</code> prints it without a traceback. <code>CommandError(cmd, rc, stdout, stderr)</code> keeps all four values and builds its message from the command (first 200 chars) plus the last 5 lines of stderr (or stdout), so a log line shows <i>why</i> a command failed, not just that it did.</p></div>
 
-<div class="fn" id="core-logging"><h4><code>setup_logging(component, logfile=None, verbose=False) · repo_logger()</code><span class="loc">jbpcore.py:115-150</span></h4>
+<div class="fn" id="core-logging"><h4><code>setup_logging(component, logfile=None, verbose=False) · repo_logger()</code><span class="loc">jbpcore.py:117-152</span></h4>
 <p>One format everywhere, in UTC:</p>
 <pre><code>2026-11-14T11:30:02Z INFO  orchestrator [perf-p2|DETECT] tool=maven java=21</code></pre>
 <ul>
@@ -335,7 +335,7 @@ sys.exit(main())</code></pre>
 <li><code>repo_logger(log, repo, stage)</code> returns a <code>LoggerAdapter</code> carrying those extras. The orchestrator mutates <code>rlog.extra["stage"]</code> as a repo moves through CLONE → DETECT → … so every line is tagged with where it came from.</li>
 </ul></div>
 
-<div class="fn" id="core-run"><h4><code>run(cmd, *, log, check=True, timeout, retries=0, backoff=5.0, input, env, cwd, retry_on=()) → CompletedProcess</code><span class="loc">jbpcore.py:155</span></h4>
+<div class="fn" id="core-run"><h4><code>run(cmd, *, log, check=True, timeout, retries=0, backoff=5.0, input, env, cwd, retry_on=()) → CompletedProcess</code><span class="loc">jbpcore.py:157</span></h4>
 <p>The single way the code runs <code>kubectl</code>, <code>aws</code>, <code>git</code>, <code>docker</code>.</p>
 <ol>
 <li>Logs the command at DEBUG (truncated to 500 chars), with the attempt number on retries.</li>
@@ -345,17 +345,17 @@ sys.exit(main())</code></pre>
 <li>When out of retries, raises <a href="#core-errors"><code>CommandError</code></a>.</li>
 </ol></div>
 
-<div class="fn" id="core-stream"><h4><code>run_streaming(cmd, *, log, prefix="", timeout=None, env=None, raw=False) → int</code><span class="loc">jbpcore.py:290</span></h4>
+<div class="fn" id="core-stream"><h4><code>run_streaming(cmd, *, log, prefix="", timeout=None, env=None, raw=False) → int</code><span class="loc">jbpcore.py:296</span></h4>
 <p>For long commands whose progress you want to see as it happens: <code>eksctl create/delete cluster</code>, <code>kubectl logs -f</code>, the local orchestrator. Merges stderr into stdout and reads line by line. Normal mode logs each line at INFO (so it gets the timestamp format). <code>raw=True</code> is for children that already log in our format: it prints the line unchanged and keeps a DEBUG copy in the file. Keeps the last 20 lines for the error message; kills the process past <code>timeout</code>; raises <code>CommandError</code> on a non-zero exit.</p></div>
 
-<div class="fn" id="core-files"><h4><code>require_tools() · write_json_atomic() · read_json()</code><span class="loc">jbpcore.py:193-216</span></h4>
+<div class="fn" id="core-files"><h4><code>require_tools() · write_json_atomic() · read_json()</code><span class="loc">jbpcore.py:197-220</span></h4>
 <ul>
 <li><code>require_tools(*tools)</code>: fails fast, naming every missing binary at once.</li>
 <li><code>write_json_atomic(path, data)</code>: writes to a temp file in the same folder and <code>os.replace</code>s it into place. <code>jbp status</code> reads <code>_status.json</code> while the orchestrator rewrites it, so a reader must never see half a file.</li>
 <li><code>read_json(path, default=None)</code>: returns <code>default</code> for a missing or corrupt file instead of raising.</li>
 </ul></div>
 
-<div class="fn" id="core-tracker"><h4><code>class StageTracker</code> (+ <code>StageEvent</code>)<span class="loc">jbpcore.py:221-287</span></h4>
+<div class="fn" id="core-tracker"><h4><code>class StageTracker</code> (+ <code>StageEvent</code>)<span class="loc">jbpcore.py:225-293</span></h4>
 <p>Records where a program is, for humans and for <code>jbp status</code>. Two files: a <b>status file</b> (current state, rewritten atomically on each change) and an <b>events file</b> (append-only JSON lines, the full history). The driver uses <code>driver_status.json</code>/<code>driver_events.jsonl</code>; the orchestrator uses <code>results/_status.json</code>/<code>results/events.jsonl</code>.</p>
 <ul>
 <li><code>__init__(status_file, events_file, run_id, component)</code>: if the existing status file has the <b>same run id</b>, keeps its <code>started</code> time and per-repo state. That is how a restarted orchestrator pod (after a spot reclaim) continues the same picture instead of starting blank.</li>
@@ -376,7 +376,7 @@ sys.exit(main())</code></pre>
 <div class="fn" id="cl-version"><h4><code>pick_version(cfg) → str</code><span class="loc">cluster.py:37</span></h4>
 <p>If <code>K8S_VERSION</code> isn't <code>auto</code>, returns it. Otherwise asks <code>eks describe-cluster-versions --version-status STANDARD_SUPPORT</code>, sorts numerically (so 1.10 &gt; 1.9) and takes the newest. A version in extended support bills the control plane at $0.60/h instead of $0.10/h.</p></div>
 
-<div class="fn" id="cl-itypes"><h4><code>available_instance_types(cfg) → list[str]</code><span class="loc">cluster.py:49</span> <span class="tag">PR #4</span></h4>
+<div class="fn" id="cl-itypes"><h4><code>available_instance_types(cfg) → list[str]</code><span class="loc">cluster.py:52</span> <span class="tag">PR #4</span></h4>
 <p>Filters <code>INSTANCE_TYPES</code> down to what the region really offers. eksctl only uses AZs that offer <i>every</i> listed type, so one missing type (m7a in ap-south-1) made creation fail with "only 0 zones discovered".</p>
 <ol>
 <li><code>ec2 describe-instance-type-offerings --location-type availability-zone</code> for the wanted types → map type → set of AZs.</li>
@@ -384,7 +384,7 @@ sys.exit(main())</code></pre>
 <li>Walk the kept types in order, intersecting AZ sets, and keep a type only if the running intersection still has ≥ 2 AZs. The result is a list whose common AZs satisfy eksctl.</li>
 </ol></div>
 
-<div class="fn" id="cl-eksctl"><h4><code>eksctl_config(cfg, version, instance_types=None) → str</code><span class="loc">cluster.py:78</span></h4>
+<div class="fn" id="cl-eksctl"><h4><code>eksctl_config(cfg, version, instance_types=None) → str</code><span class="loc">cluster.py:82</span></h4>
 <p>Returns the eksctl <code>ClusterConfig</code> YAML as an f-string. Key fields:</p>
 <pre><code>iam: {withOIDC: true}                       <span class="c"># IRSA for the EBS CSI driver</span>
 vpc:
@@ -402,7 +402,7 @@ managedNodeGroups:
     labels: {jbp/pool: build}</code></pre>
 <p>Tags <code>project=java-build-perf</code> and <code>jbp-ephemeral=true</code> go on everything eksctl creates. A unit test parses the output with PyYAML.</p></div>
 
-<div class="fn" id="cl-up"><h4><code>up(cfg, tracker=None)</code><span class="loc">cluster.py:115</span></h4>
+<div class="fn" id="cl-up"><h4><code>up(cfg, tracker=None)</code><span class="loc">cluster.py:119</span></h4>
 <ol>
 <li><code>check_credentials</code>.</li>
 <li>If the cluster exists, reuse it (makes <code>--keep</code> + repeated runs cheap). Otherwise: <code>pick_version</code>, <code>available_instance_types</code>, write <code>eksctl_config</code> to a temp file, and <a href="#core-stream"><code>run_streaming</code></a> <code>eksctl create cluster -f</code> with a 1 h timeout, each eksctl line logged with an <code>eksctl: </code> prefix. Failure raises a <code>JbpError</code> telling you <code>jbp down</code> cleans up partial stacks.</li>
@@ -411,7 +411,7 @@ managedNodeGroups:
 <li>Logs each node's instance type, capacity type (SPOT) and zone.</li>
 </ol></div>
 
-<div class="fn" id="cl-down"><h4><code>down(cfg) → bool</code><span class="loc">cluster.py:144</span></h4>
+<div class="fn" id="cl-down"><h4><code>down(cfg) → bool</code><span class="loc">cluster.py:151</span></h4>
 <ol>
 <li><code>check_credentials</code>. If the cluster exists:</li>
 <li>Update kubeconfig and <b>delete the <code>jbp</code> namespace first</b>, waiting up to 5 min. That deletes the PVC while the EBS CSI driver still runs, so the driver deletes the volume. If the cluster went first, the volume would be orphaned and keep billing. Failure here is only a warning; the leftovers check catches the volume.</li>
@@ -419,7 +419,7 @@ managedNodeGroups:
 <li>Returns <a href="#cl-left"><code>wait_until_clean()</code></a>.</li>
 </ol></div>
 
-<div class="fn" id="cl-left"><h4><code>leftovers(cfg) → dict · wait_until_clean(cfg, timeout_s=1200, every_s=30) → bool · delete_orphan_volumes(cfg)</code><span class="loc">cluster.py:169-209</span></h4>
+<div class="fn" id="cl-left"><h4><code>leftovers(cfg) → dict · wait_until_clean(cfg, timeout_s=1200, every_s=30) → bool · delete_orphan_volumes(cfg)</code><span class="loc">cluster.py:182-222</span></h4>
 <ul>
 <li><code>leftovers</code> returns a dict with any of: <code>cluster</code> (still exists), <code>stacks</code> (CloudFormation stacks named <code>eksctl-&lt;name&gt;-*</code> in a live or failed state), <code>volumes</code> (EBS volumes tagged <code>jbp-cluster=&lt;name&gt;</code>). Empty dict means clean.</li>
 <li><code>wait_until_clean</code> is the poller: calls <code>leftovers</code> every 30 s for up to 20 min, logging what is still present. On timeout, logs each item as <code>STILL BILLING</code> plus how to fix it, and returns False.</li>
@@ -439,7 +439,7 @@ managedNodeGroups:
 <li><code>ts(s)</code>: ISO timestamp → epoch seconds.</li>
 </ul></div>
 
-<div class="fn"><h4><code>Per-repo rows</code><span class="loc">make_report.py:42-74</span></h4>
+<div class="fn"><h4><code>Per-repo rows</code><span class="loc">make_report.py:42-75</span></h4>
 <p>For each <code>results/&lt;repo&gt;.json</code> (skipping <code>.build.json</code>, <code>.pod.json</code> and <code>_*</code> files):</p>
 <ul>
 <li>From <code>&lt;repo&gt;.pod.json</code> (saved by <a href="#or-k8s">K8sLauncher</a>): <code>queue_s</code> = PodScheduled time − pod creation (waiting for a node), <code>startup_s</code> = container start − scheduled (mostly image pull), and the node name.</li>
@@ -448,10 +448,10 @@ managedNodeGroups:
 </ul>
 <p>Then totals: pass count, total build and clone time, tests and failed tests.</p></div>
 
-<div class="fn"><h4><code>p(k) · phase durations</code><span class="loc">make_report.py:83-94</span></h4>
+<div class="fn"><h4><code>p(k) · phase durations</code><span class="loc">make_report.py:84-95</span></h4>
 <p><code>p()</code> reads a phase timestamp with aliases, so <code>run_start</code> falls back to <code>deploy_start</code> or <code>orchestrate_start</code> (local-docker has no DEPLOY) and <code>run_end</code> to <code>collect_end</code>/<code>orchestrate_end</code>. Derives <code>run_wall</code>, <code>up_s</code>, <code>down_s</code>.</p></div>
 
-<div class="fn"><h4><code>cost(cp_s, node_s) → dict</code><span class="loc">make_report.py:101</span></h4>
+<div class="fn"><h4><code>cost(cp_s, node_s) → dict</code><span class="loc">make_report.py:104</span></h4>
 <p>Cost lines for given control-plane seconds and node seconds:</p>
 <pre><code>control plane = PRICE_EKS_HOUR  × cp_hours
 spot nodes    = PRICE_NODE_HOUR × nodes × node_hours
@@ -462,7 +462,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li><b>Projected</b>: a typical ephemeral run of this workload, 18 min up + builds + 3 min collect + 12 min down.</li>
 </ul></div>
 
-<div class="fn"><h4><code>HTML and CSV output</code><span class="loc">make_report.py:120-258</span></h4>
+<div class="fn"><h4><code>HTML and CSV output</code><span class="loc">make_report.py:125-263</span></h4>
 <ul>
 <li><code>fmt()</code>, <code>mmss()</code>: number and duration formatting; <code>cost_table()</code>: a card per cost dict.</li>
 <li>An inline SVG of stacked bars per repo: clone | wait + pull | build (green pass / red fail), scaled to the slowest repo.</li>
@@ -479,14 +479,14 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <div class="fn" id="or-parse"><h4><code>parse_repos(path) → (list[RepoSpec], list[str])</code><span class="loc">orchestrator.py:52</span></h4>
 <p>Parses <a href="#repos">repos.txt</a>. Per line: drop comments; split on whitespace; need at least <code>name url</code>. The remaining tokens without <code>=</code> are positional <code>ref</code> and <code>subdir</code> (<code>-</code> means default). Tokens with <code>=</code> are overrides: <code>tool=maven|gradle</code>, <code>java=N</code>. Problems (too few fields, unknown override, duplicate name) are <b>collected, not raised</b>: the bad line is skipped and <code>main()</code> logs a warning, so one typo doesn't sink the run.</p></div>
 
-<div class="fn" id="or-data"><h4><code>RepoSpec · Plan · Outcome</code> (dataclasses)<span class="loc">orchestrator.py:42-102</span></h4>
+<div class="fn" id="or-data"><h4><code>RepoSpec · Plan · Outcome</code> (dataclasses)<span class="loc">orchestrator.py:42-106</span></h4>
 <ul>
 <li><code>RepoSpec</code>: one repos.txt line: <code>name, url, ref, subdir, tool, java, line</code>.</li>
 <li><code>Plan</code>: what DETECT decided: <code>tool, wrapper, java_required, java_source, jdk, image, workdir, notes</code>.</li>
 <li><code>Outcome</code>: how LAUNCH/WAIT ended: <code>ok</code>, <code>failure_kind</code> (<code>build | timeout | image | unschedulable | infra</code>), <code>message</code>, <code>attempts</code>.</li>
 </ul></div>
 
-<div class="fn" id="or-k8s"><h4><code>class K8sLauncher</code><span class="loc">orchestrator.py:107</span></h4>
+<div class="fn" id="or-k8s"><h4><code>class K8sLauncher</code><span class="loc">orchestrator.py:111</span></h4>
 <p>Creates one Job per repo from <a href="#k-build">build-job.tpl.yaml</a> and watches it.</p>
 <ul>
 <li><code>job_name(repo)</code>: lowercases, turns anything non-alphanumeric into <code>-</code>, prefixes <code>jbp-build-</code>, cuts to 63 chars (Kubernetes name limit).</li>
@@ -506,7 +506,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li>For <code>image</code>, <code>unschedulable</code> and <code>infra</code> failures, delete the Job so it stops retrying in the background.</li>
 </ol></div>
 
-<div class="fn" id="or-pod"><h4><code>K8sLauncher._pod_problem(pods, bad_since, pull_grace, sched_grace) → (note, Outcome|None)</code><span class="loc">orchestrator.py:193</span></h4>
+<div class="fn" id="or-pod"><h4><code>K8sLauncher._pod_problem(pods, bad_since, pull_grace, sched_grace) → (note, Outcome|None)</code><span class="loc">orchestrator.py:213</span></h4>
 <p>Turns the newest pod's status into a human note and, after a grace period, a fatal Outcome. Without it, a typo in an image name would just sit in <code>ImagePullBackOff</code> until the build timeout (30 min).</p>
 <ol>
 <li>No pods yet → "waiting for the pod to be created".</li>
@@ -515,20 +515,20 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li>Running → "pod X running on node Y"; any other waiting reason or phase → a note only.</li>
 </ol></div>
 
-<div class="fn" id="or-docker"><h4><code>class DockerLauncher</code><span class="loc">orchestrator.py:221</span></h4>
+<div class="fn" id="or-docker"><h4><code>class DockerLauncher</code><span class="loc">orchestrator.py:246</span></h4>
 <p>The local path behind <code>jbp local-docker</code>: same image, same <code>build.sh</code>, a host folder in place of the PVC. <code>launch_and_wait</code> converts <code>BUILD_CPU</code> (<code>500m</code> → <code>0.5</code>) and <code>BUILD_MEM</code> (<code>4Gi</code> → <code>4g</code>) to Docker flags, mounts the workspace at <code>/workspace</code> and <code>pipeline/</code> read-only at <code>/app</code>, passes the same env vars as the Job template, and runs <code>docker run --rm … bash /app/build.sh</code> synchronously. <code>DOCKER_EXTRA_ARGS</code> passes extra flags through. Output goes to <code>&lt;repo&gt;.docker.out</code>. rc 0 → ok; 124 → timeout; "pull access denied" → image; else build.</p></div>
 
-<div class="fn" id="or-init"><h4><code>Orchestrator.__init__(cfg)</code><span class="loc">orchestrator.py:258</span></h4>
+<div class="fn" id="or-init"><h4><code>Orchestrator.__init__(cfg)</code><span class="loc">orchestrator.py:284</span></h4>
 <p>Sets up <code>/workspace/{results,repos,cache}</code>, the run id, the image map via <a href="#core-settings"><code>load_images</code></a>, the sorted list of supported JDKs (<code>SUPPORTED_JDKS</code>), the <a href="#core-tracker"><code>StageTracker</code></a> on <code>results/_status.json</code>, and the launcher chosen by <code>LAUNCHER</code> (<code>k8s</code> or <code>docker</code>; anything else is a <code>JbpError</code>).</p></div>
 
-<div class="fn" id="or-pick"><h4><code>pick_jdk(need) · pick_image(tool, wrapper, jdk) · result_path() · save_result(name, facts)</code><span class="loc">orchestrator.py:278-297</span></h4>
+<div class="fn" id="or-pick"><h4><code>pick_jdk(need) · pick_image(tool, wrapper, jdk) · result_path() · save_result(name, facts)</code><span class="loc">orchestrator.py:304-334</span></h4>
 <ul>
 <li><code>pick_jdk</code>: the <b>smallest</b> supported JDK ≥ the required version (needs 18 → 21), or the newest if none is high enough (<code>plan()</code> adds a warning note then).</li>
 <li><code>pick_image</code>: Maven → <code>MAVEN_IMAGE_&lt;jdk&gt;</code>; Gradle with <code>gradlew</code> → <code>JDK_IMAGE_&lt;jdk&gt;</code> (the wrapper downloads its pinned Gradle); Gradle without wrapper → <code>GRADLE_IMAGE_&lt;jdk&gt;</code>. Missing key → <code>JbpError</code>.</li>
 <li><code>save_result</code>: merges the build pod's own <code>&lt;repo&gt;.build.json</code> (timings, CPU, tests) with the orchestrator's facts (repo, commit, plan, outcome). <b>Orchestrator facts win</b> on conflicts. Notes an unreadable build.json; defaults <code>rc</code> from <code>ok</code>; writes <code>results/&lt;repo&gt;.json</code> atomically. This merged file is the one source the report reads.</li>
 </ul></div>
 
-<div class="fn" id="or-clone"><h4><code>clone(spec, rlog) → dict</code><span class="loc">orchestrator.py:300</span></h4>
+<div class="fn" id="or-clone"><h4><code>clone(spec, rlog) → dict</code><span class="loc">orchestrator.py:337</span></h4>
 <ol>
 <li>Removes any old <code>/workspace/repos/&lt;name&gt;</code>.</li>
 <li>With a <code>ref</code>: tries <code>git clone --depth 1 --branch &lt;ref&gt;</code> (works for branches and tags). If that fails, the ref is probably a commit SHA, so it falls back to a full clone + <code>git checkout &lt;ref&gt;</code>. Without a ref: shallow clone of the default branch.</li>
@@ -536,13 +536,13 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li>Returns <code>clone_s</code>, short <code>commit</code> and <code>repo_kb</code> (size on disk).</li>
 </ol></div>
 
-<div class="fn" id="or-plan"><h4><code>plan(spec) → Plan</code><span class="loc">orchestrator.py:323</span></h4>
+<div class="fn" id="or-plan"><h4><code>plan(spec) → Plan</code><span class="loc">orchestrator.py:365</span></h4>
 <p>The DETECT stage. Resolves the work dir (repo root or <code>subdir</code>, error if missing), calls <a href="#de-detect"><code>detect(workdir, spec.tool)</code></a>, fails if no build was found, lets a <code>java=N</code> override from repos.txt win over detection, picks JDK and image, and carries detection notes forward.</p></div>
 
-<div class="fn" id="or-process"><h4><code>process(spec, plan, facts)</code> — never raises<span class="loc">orchestrator.py:337</span></h4>
+<div class="fn" id="or-process"><h4><code>process(spec, plan, facts)</code> — never raises<span class="loc">orchestrator.py:382</span></h4>
 <p>LAUNCH → WAIT → COLLECT for one repo. Any exception from the launcher becomes <code>Outcome(infra)</code> with the traceback logged. Records <code>launch_ms</code>, <code>done_ms</code>, <code>job_wall_s</code>, <code>ok</code>, <code>attempts</code>; on failure, <code>stage</code> (<code>build</code> for build/timeout, else <code>launch</code>), <code>failure_kind</code>, <code>failure_message</code>. Calls <code>save_result</code>, re-reads the merged result for a one-line summary ("build 3:34, tests 412"), marks the repo DONE/PASS or FAILED/FAIL, and logs it.</p></div>
 
-<div class="fn" id="or-run"><h4><code>Orchestrator.run(specs) → int</code><span class="loc">orchestrator.py:368</span></h4>
+<div class="fn" id="or-run"><h4><code>Orchestrator.run(specs) → int</code><span class="loc">orchestrator.py:415</span></h4>
 <ol>
 <li>Phase ORCHESTRATE started; logs the run shape (repo count, launcher, parallelism, pod size, cache mode).</li>
 <li>If <code>MAX_PARALLEL &gt; 1</code>, creates a <code>ThreadPoolExecutor</code>.</li>
@@ -558,7 +558,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 </ol>
 <p class="note">With parallelism, clone and detect still happen one at a time in the main thread; only the build Jobs overlap. All build pods share the node the PVC is attached to (see <a href="#k-build">podAffinity</a>), so <code>MAX_PARALLEL × BUILD_CPU</code> has to fit on one node.</p></div>
 
-<div class="fn" id="or-main"><h4><code>main() → int</code><span class="loc">orchestrator.py:441</span></h4>
+<div class="fn" id="or-main"><h4><code>main() → int</code><span class="loc">orchestrator.py:496</span></h4>
 <ol>
 <li><code>Settings.load(SETTINGS_FILE)</code>, which in the pod is the driver's effective settings from the ConfigMap. Then copies orchestrator-only env knobs that aren't in settings.env: <code>WORKSPACE, RUN_ID, LAUNCHER, IMAGES_FILE, TEMPLATE, REPOS_FILE, SKIP_DONE, PVC_NAME</code>.</li>
 <li>Logging to the console (which <code>kubectl logs</code> shows) and <code>results/orchestrator.log</code> on the PVC. <code>VERBOSE=1</code> for DEBUG.</li>
@@ -575,10 +575,10 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <div class="fn" id="de-norm"><h4><code>normalise(v) → int | None</code><span class="loc">detect.py:38</span></h4>
 <p>Turns any version spelling into a major number: <code>1.8</code> → 8, <code>17.0.2</code> → 17, <code>21-tem</code> → 21, <code>temurin-21.0.1</code> → 21. Takes the first <code>N</code> or <code>N.M</code> in the string; maps <code>1.M</code> to <code>M</code>; rejects anything outside 6–99 (so a stray <code>3</code> isn't taken as Java 3).</p></div>
 
-<div class="fn" id="de-files"><h4><code>from_version_files(root) → (java, source) | None</code><span class="loc">detect.py:63</span></h4>
+<div class="fn" id="de-files"><h4><code>from_version_files(root) → (java, source) | None</code><span class="loc">detect.py:65</span></h4>
 <p>Checks, in order, <code>.java-version</code> (first line), <code>.sdkmanrc</code> (<code>java=…</code>), <code>.tool-versions</code> (<code>java …</code>), <code>.mvn/jdk</code>. These are explicit statements of intent, so they beat anything inferred from build files.</p></div>
 
-<div class="fn" id="de-pom"><h4><code>class Pom</code> (+ <code>_strip_ns</code>)<span class="loc">detect.py:81-130</span></h4>
+<div class="fn" id="de-pom"><h4><code>class Pom</code> (+ <code>_strip_ns</code>)<span class="loc">detect.py:85-139</span></h4>
 <ul>
 <li><code>_strip_ns</code> removes the <code>{http://maven.apache.org/POM/4.0.0}</code> namespace from every tag, so lookups can say <code>properties/*</code> instead of carrying the namespace.</li>
 <li><code>__init__</code> parses the file and collects <code>&lt;properties&gt;</code> into a dict.</li>
@@ -588,7 +588,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li><code>compiler_config(key)</code>: all <code>&lt;release&gt;</code>/<code>&lt;target&gt;</code>/<code>&lt;source&gt;</code> values in any <code>maven-compiler-plugin</code> configuration, including executions.</li>
 </ul></div>
 
-<div class="fn" id="de-maven"><h4><code>from_maven(root, notes) → (java, source) | None</code><span class="loc">detect.py:133</span></h4>
+<div class="fn" id="de-maven"><h4><code>from_maven(root, notes) → (java, source) | None</code><span class="loc">detect.py:142</span></h4>
 <ol>
 <li>Parses every <code>pom.xml</code> under root; a parse error becomes a note, not a crash.</li>
 <li>Links each POM to its local parent, so <code>${java.version}</code> defined in a parent resolves in a child.</li>
@@ -596,10 +596,10 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li>Last resort: the highest <code>&lt;version&gt;</code> in <code>.mvn/toolchains.xml</code>.</li>
 </ol></div>
 
-<div class="fn" id="de-gradle"><h4><code>from_gradle(root) → (java, source) | None</code><span class="loc">detect.py:194</span></h4>
+<div class="fn" id="de-gradle"><h4><code>from_gradle(root) → (java, source) | None</code><span class="loc">detect.py:215</span></h4>
 <p>Reads every <code>*.gradle</code>, <code>*.gradle.kts</code>, <code>gradle.properties</code> and <code>libs.versions.toml</code>, and tries regexes in <code>GRADLE_RULES</code> order: <code>JavaLanguageVersion.of(N)</code> (toolchain) → <code>jvmToolchain(N)</code> → <code>release = N</code> / <code>release.set(N)</code> → <code>JavaVersion.VERSION_N</code> (and <code>VERSION_1_8</code>) → <code>source/targetCompatibility = …</code> → a <code>javaVersion=</code> property. Regex rather than parsing because Groovy/Kotlin DSL can't be evaluated without Gradle.</p></div>
 
-<div class="fn" id="de-detect"><h4><code>detect(repo_dir, force_tool=None) → Detection</code> · <code>main(argv)</code><span class="loc">detect.py:207-245</span></h4>
+<div class="fn" id="de-detect"><h4><code>detect(repo_dir, force_tool=None) → Detection</code> · <code>main(argv)</code><span class="loc">detect.py:228-272</span></h4>
 <ol>
 <li>Tool: <code>force_tool</code> if given; else <code>pom.xml</code> → maven; else any <code>build.gradle(.kts)</code>/<code>settings.gradle(.kts)</code> → gradle; else unknown (with a note). Both present → Maven, with a note suggesting <code>tool=gradle</code>.</li>
 <li>Wrapper: <code>mvnw</code> or <code>gradlew</code> exists at the build root.</li>
@@ -613,7 +613,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <div class="meta"><span>bash, 90 lines</span><span>Runs inside the build container</span><span>Started by <a href="#k-build">the build Job</a> or <a href="#or-docker">DockerLauncher</a></span></div>
 <p>Shell, not Python, because the Maven/Gradle/Temurin images have bash but no Python. It runs the build and measures it from inside the pod's own cgroup. <code>set -uo pipefail</code> (no <code>-e</code>, so a failed build still reaches the measuring code). Required env: <code>REPO_NAME TOOL WORKDIR RESULT_DIR</code>; also reads <code>WRAPPER JAVA DEP_CACHE MAVEN_ARGS_EXTRA GRADLE_ARGS_EXTRA MAVEN_GOALS GRADLE_TASKS CACHE_ROOT</code>.</p>
 
-<div class="fn"><h4><code>cgroup helpers</code><span class="loc">build.sh:14-36</span></h4>
+<div class="fn"><h4><code>cgroup helpers</code><span class="loc">build.sh:19-41</span></h4>
 <p>Each reads cgroup v2 first (EKS on AL2023) and falls back to v1:</p>
 <div class="wrap"><table>
 <tr><th>Function</th><th>v2 source</th><th>Returns</th></tr>
@@ -625,7 +625,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <tr><td><code>now_ms</code></td><td><code>date +%s%3N</code></td><td>epoch ms</td></tr>
 </table></div></div>
 
-<div class="fn"><h4><code>Script flow</code><span class="loc">build.sh:38-90</span></h4>
+<div class="fn"><h4><code>Script flow</code><span class="loc">build.sh:43-113</span></h4>
 <ol>
 <li><b>Command</b>: Maven → <code>mvn</code> or <code>./mvnw</code> (made executable) <code>-B -ntp -e</code>, plus <code>-Dmaven.repo.local=/workspace/cache/m2</code> when <code>DEP_CACHE=shared</code>, plus extra args, goal <code>verify</code>. Gradle → <code>gradle</code> or <code>./gradlew</code> <code>--no-daemon --console=plain</code>, task <code>build</code>, with <code>GRADLE_USER_HOME=/workspace/cache/gradle</code> when shared. The shared cache lives on the PVC, so later repos reuse dependencies earlier ones downloaded.</li>
 <li>Writes a header and <code>java -version</code> to <code>results/&lt;repo&gt;.build.log</code>.</li>
@@ -865,7 +865,7 @@ rest-svc-gradle      https://github.com/spring-guides/gs-rest-service.git   -   
 <p>Found while writing this page. None of them breaks a run; they are candidates for a small clean-up PR.</p>
 <ul>
 <li><b>The report's "tries" column always shows 1.</b> <a href="#or-k8s">K8sLauncher</a> stores <code>attempts</code> in <code>results/&lt;repo&gt;.json</code>, but <a href="#report">make_report.py</a> (line 70-71) overwrites it with the contents of a <code>&lt;repo&gt;.attempts</code> file that nothing writes any more (a leftover of the earlier shell version), falling back to 1. So a build that survived a spot reclaim isn't flagged in the report.</li>
-<li><b>Two stale comments</b> mention the old shell scripts: <code>k8s/collector-pod.yaml</code> says "used by bin/run.sh" (now <a href="#cli-collect">cli.collect()</a>) and <code>k8s/storageclass-eks.yaml</code> says "so bin/down.sh can find" (now <a href="#cl-left">cluster.leftovers()</a>). The report footer also says prices come from "config/run.env"; they come from <code>settings.env</code> / <code>settings.effective.env</code>.</li>
+<li><b>Report footer wording.</b> The report says prices come from "config/run.env"; they come from <code>settings.env</code> / <code>settings.effective.env</code>.</li>
 <li><b>The PVC name is fixed in three places.</b> <code>pvc.yaml</code>, <code>orchestrator-job.yaml</code> and <code>collector-pod.yaml</code> hard-code <code>jbp-workspace</code>, while <a href="#or-k8s">K8sLauncher.render</a> reads an optional <code>PVC_NAME</code>. Setting <code>PVC_NAME</code> alone would point build Jobs at a claim that doesn't exist.</li>
 <li><b><code>Orchestrator.run</code> returns 0 even when every repo fails</b>, by design: the orchestrator Job is Complete and the failures show in the report. <code>jbp run</code> exits non-zero only if the orchestrator itself crashed.</li>
 </ul>

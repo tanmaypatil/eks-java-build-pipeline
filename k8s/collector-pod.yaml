@@ -1,12 +1,17 @@
-# Short-lived pod used by bin/run.sh to copy results off the PVC.
+# Short-lived pod used by the driver (cli.py collect) to copy results off the PVC with `kubectl cp`.
+# Needed because the orchestrator pod has already exited, and `kubectl cp` only works on a running container.
 apiVersion: v1
 kind: Pod
+# Same app label as the orchestrator, consistent with the other pods that use the workspace.
 metadata: {name: jbp-collector, namespace: __NAMESPACE__, labels: {app: jbp-orchestrator}}
 spec:
   restartPolicy: Never
   containers:
     - name: c
+      # alpine/k8s has tar, which `kubectl cp` needs inside the container.
       image: __ORCH_IMAGE__
+      # Just stay alive long enough to be copied from. If the driver dies before deleting the pod,
+      # it exits by itself after 15 minutes.
       command: ["sleep", "900"]
       resources: {requests: {cpu: 50m, memory: 64Mi}}
       volumeMounts: [{name: workspace, mountPath: /workspace}]

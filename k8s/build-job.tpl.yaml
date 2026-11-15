@@ -1,46 +1,63 @@
 # Rendered by pipeline/orchestrator.py for each repo (double-underscore placeholders).
+# One Job = one build of one repo: runs pipeline/build.sh in the image picked for its tool + Java version.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: __JOB__
   namespace: __NAMESPACE__
+  # app=jbp-build lets the driver delete all build Jobs before a new run; jbp/run + jbp/repo trace each one.
   labels: {app: jbp-build, jbp/run: "__RUN_ID__", jbp/repo: "__REPO__"}
 spec:
+  # A failed build is not retried: the same code would fail the same way. (Evictions are handled below.)
   backoffLimit: 0
+  # BUILD_TIMEOUT_S: Kubernetes kills the pod and fails the Job with reason DeadlineExceeded,
+  # which the orchestrator reports as failure_kind=timeout.
   activeDeadlineSeconds: __TIMEOUT__
   podFailurePolicy:
+    # Rules are checked in order; the first that matches decides.
     rules:
       # spot reclaim / node drain: retry without counting against backoffLimit
       - action: Ignore
         onPodConditions: [{type: DisruptionTarget}]
+      # build.sh exited non-zero (compile error, failed tests): fail the Job immediately
       - action: FailJob
         onExitCodes: {operator: NotIn, values: [0]}
   template:
     metadata:
       labels: {app: jbp-build, jbp/run: "__RUN_ID__"}
     spec:
-      restartPolicy: Never
+      restartPolicy: Never   # required by podFailurePolicy
       # the workspace PVC is ReadWriteOnce (EBS): keep builds on the orchestrator's node
       affinity:
         podAffinity:
+          # "required..." = hard rule: if that node has no room the pod stays Unschedulable (the orchestrator
+          # fails it after UNSCHEDULABLE_GRACE_S). "...IgnoredDuringExecution" = only checked at scheduling.
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector: {matchLabels: {app: jbp-orchestrator}}
+              # "same node" (hostname), not just same zone: an EBS volume attaches to one node only.
               topologyKey: kubernetes.io/hostname
       containers:
         - name: build
+          # Chosen by orchestrator.py pick_image(): maven / eclipse-temurin / gradle image for the JDK.
           image: __IMAGE__
+          # Reuse an image already on the node: the next repo on the same JDK starts without a pull.
           imagePullPolicy: IfNotPresent
+          # build.sh comes from the jbp-code ConfigMap, so the stock image needs nothing added.
           command: ["bash", "/app/build.sh"]
+          # Inputs for build.sh; tool/wrapper/java come from detect.py, the rest from settings.env.
           env:
             - {name: REPO_NAME, value: "__REPO__"}
-            - {name: TOOL, value: "__TOOL__"}
-            - {name: WRAPPER, value: "__WRAPPER__"}
-            - {name: JAVA, value: "__JAVA__"}
-            - {name: WORKDIR, value: "__WORKDIR__"}
+            - {name: TOOL, value: "__TOOL__"}          # maven | gradle
+            - {name: WRAPPER, value: "__WRAPPER__"}    # yes = run ./mvnw or ./gradlew
+            - {name: JAVA, value: "__JAVA__"}          # JDK major version in the image
+            - {name: WORKDIR, value: "__WORKDIR__"}    # the repo (or its subdir) on the PVC
             - {name: RESULT_DIR, value: /workspace/results}
-            - {name: DEP_CACHE, value: "__DEP_CACHE__"}
+            - {name: DEP_CACHE, value: "__DEP_CACHE__"}   # shared = reuse the dependency cache on the PVC
             - {name: MAVEN_ARGS_EXTRA, value: "__MAVEN_ARGS__"}
             - {name: GRADLE_ARGS_EXTRA, value: "__GRADLE_ARGS__"}
+          # requests == limits gives the pod "Guaranteed" QoS, the same shape as an OpenShift build pod.
+          # The CPU limit becomes the cgroup CFS quota: the JVM sizes its thread pools from it, and
+          # build.sh measures how often it throttles the build.
           resources:
             requests: {cpu: "__CPU__", memory: "__MEM__"}
             limits:   {cpu: "__CPU__", memory: "__MEM__"}

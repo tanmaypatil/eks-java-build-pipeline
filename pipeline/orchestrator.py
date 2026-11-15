@@ -53,6 +53,7 @@ def parse_repos(path: Path) -> tuple[list[RepoSpec], list[str]]:
     """repos.txt: `name url [ref|-] [subdir|-] [tool=maven|gradle] [java=N]`. Returns (specs, problems)."""
     specs, problems, seen = [], [], set()
     for n, raw in enumerate(path.read_text().splitlines(), 1):
+        # Strip comments: whole-line "#..." and trailing "  # ..." (URLs never contain " #").
         line = raw.split("#", 1)[0].strip() if not raw.lstrip().startswith("#") else ""
         if not line:
             continue
@@ -61,6 +62,8 @@ def parse_repos(path: Path) -> tuple[list[RepoSpec], list[str]]:
             problems.append(f"line {n}: need at least 'name url': {raw.strip()!r}")
             continue
         s = RepoSpec(parts[0], parts[1], line=n)
+        # Tokens after the URL: those WITHOUT "=" are positional (ref, then subdir; "-" = default),
+        # those WITH "=" are overrides. So "name url tool=gradle" works without writing "- -".
         pos = [p for p in parts[2:] if "=" not in p]
         if len(pos) > 0 and pos[0] != "-":
             s.ref = pos[0]
@@ -74,6 +77,7 @@ def parse_repos(path: Path) -> tuple[list[RepoSpec], list[str]]:
                 s.java = int(v)
             else:
                 problems.append(f"line {n}: unknown override {kv!r} (use tool=maven|gradle or java=N)")
+        # Problems are collected, not raised: one bad line is skipped and the rest of the list still runs.
         if s.name in seen:
             problems.append(f"line {n}: duplicate name {s.name!r}, skipped")
             continue
@@ -115,6 +119,7 @@ class K8sLauncher:
         self.ns = cfg["NAMESPACE"]
 
     def job_name(self, repo: str) -> str:
+        # Kubernetes names must be lowercase DNS labels (a-z, 0-9, "-") of at most 63 characters.
         safe = "".join(c if c.isalnum() else "-" for c in repo.lower()).strip("-")
         return f"jbp-build-{safe}"[:63].rstrip("-")
 
@@ -138,13 +143,17 @@ class K8sLauncher:
     def launch_and_wait(self, spec: RepoSpec, plan: Plan, rlog, tracker: StageTracker) -> Outcome:
         job = self.job_name(spec.name)
         manifest = self.render(spec, plan)
-        (self.results / f"{spec.name}.job.yaml").write_text(manifest)
+        (self.results / f"{spec.name}.job.yaml").write_text(manifest)   # keep exactly what ran, for debugging
+        # A Job's pod template is immutable, so a Job left over from an earlier attempt must be deleted
+        # (and gone) before the new one can be applied under the same name.
         self.kubectl("delete", "job", job, "--ignore-not-found", "--wait=true", rlog=rlog, check=False, timeout=120)
         self.kubectl("apply", "-f", "-", input=manifest, rlog=rlog, retries=3, timeout=60)
         rlog.info("job %s created (image %s, %s CPU / %s)", job, plan.image, self.cfg["BUILD_CPU"], self.cfg["BUILD_MEM"])
         tracker.repo(spec.name, "WAIT", job=job)
         rlog.extra["stage"] = "WAIT"
 
+        # Our own safety-net timeout. The Job's activeDeadlineSeconds (BUILD_TIMEOUT_S) normally fires
+        # first; the extra 10 min covers image pull and scheduling time, which that deadline also counts.
         timeout = self.cfg.int("BUILD_TIMEOUT_S") + 600
         pull_grace, sched_grace = self.cfg.int("IMAGE_PULL_GRACE_S"), self.cfg.int("UNSCHEDULABLE_GRACE_S")
         t0, api_errors, last_note, bad_since = time.time(), 0, "", {}
@@ -158,6 +167,8 @@ class K8sLauncher:
                                                rlog=rlog, timeout=30).stdout)["items"]
                 api_errors = 0
             except (CommandError, ValueError) as e:
+                # A single failed API read is normal (API server restart, network blip). Only give up after
+                # 12 in a row (~1 min at 5 s per poll), then report it as an infrastructure failure.
                 api_errors += 1
                 rlog.warning("could not read job status (%d in a row): %s", api_errors, e)
                 if api_errors >= 12:
@@ -166,6 +177,12 @@ class K8sLauncher:
 
             st = j.get("status", {})
             conds = {c["type"]: c for c in st.get("conditions", []) if c.get("status") == "True"}
+            # Decision ladder, first match wins:
+            #   Job succeeded                    -> PASS
+            #   Job Failed, DeadlineExceeded     -> timeout (activeDeadlineSeconds hit)
+            #   Job Failed, any other reason     -> build   (build.sh exited non-zero -> podFailurePolicy FailJob)
+            #   our own timeout passed           -> timeout
+            #   otherwise inspect the pod        -> may fail early on image / scheduling problems
             if st.get("succeeded", 0) >= 1:
                 outcome = Outcome(True)
             elif "Failed" in conds:
@@ -185,7 +202,10 @@ class K8sLauncher:
         if pods:
             pods.sort(key=lambda p: p["metadata"]["creationTimestamp"])
             (self.results / f"{spec.name}.pod.json").write_text(json.dumps(pods[-1]))
+            # Every pod is one attempt: a spot reclaim (DisruptionTarget) makes the Job start a new pod.
             outcome.attempts = len(pods)
+        # These failures leave the Job retrying or Pending in the background; delete it so it stops using
+        # the node. Build/timeout failures are already terminal, so their Job is kept for inspection.
         if not outcome.ok and outcome.failure_kind in ("image", "unschedulable", "infra"):
             self.kubectl("delete", "job", job, "--wait=false", rlog=rlog, check=False, timeout=60)
         return outcome
@@ -194,10 +214,13 @@ class K8sLauncher:
         """Describe what the pod is doing; return (note, fatal Outcome or None)."""
         if not pods:
             return "waiting for the pod to be created", None
-        pod = sorted(pods, key=lambda p: p["metadata"]["creationTimestamp"])[-1]
+        pod = sorted(pods, key=lambda p: p["metadata"]["creationTimestamp"])[-1]   # newest attempt only
         name, now = pod["metadata"]["name"], time.time()
+        # bad_since remembers when each (pod, problem) was first seen. A problem only becomes fatal after its
+        # grace period, because both can clear on their own (node still joining, registry briefly slow).
         phase = pod.get("status", {}).get("phase", "?")
         for c in pod.get("status", {}).get("conditions", []):
+            # Unschedulable: no node has room (CPU/memory request too big), or podAffinity can't be met.
             if c["type"] == "PodScheduled" and c.get("status") == "False" and c.get("reason") == "Unschedulable":
                 first = bad_since.setdefault((name, "Unschedulable"), now)
                 if now - first > sched_grace:
@@ -205,6 +228,8 @@ class K8sLauncher:
                 return f"pod {name} unschedulable for {fmt_duration(now - first)}: {c.get('message', '')[:160]}", None
         for cs in pod.get("status", {}).get("containerStatuses", []) or []:
             waiting = cs.get("state", {}).get("waiting")
+            # Image or container-config problems: a wrong image name never fixes itself, so without this the
+            # repo would sit in ImagePullBackOff until the full build timeout.
             if waiting and waiting.get("reason") in self.FATAL_WAIT_REASONS:
                 first = bad_since.setdefault((name, waiting["reason"]), now)
                 msg = waiting.get("message", waiting["reason"])
@@ -226,6 +251,7 @@ class DockerLauncher:
 
     def launch_and_wait(self, spec: RepoSpec, plan: Plan, rlog, tracker: StageTracker) -> Outcome:
         cpu = self.cfg["BUILD_CPU"]
+        # Translate Kubernetes quantities to Docker flags: "500m" -> "0.5" CPUs, "4Gi" -> "4g".
         cpus = str(int(cpu[:-1]) / 1000) if cpu.endswith("m") else cpu
         mem = self.cfg["BUILD_MEM"].replace("Gi", "g").replace("Mi", "m")
         rel = plan.workdir.relative_to(self.ws)
@@ -245,7 +271,7 @@ class DockerLauncher:
         (self.results / f"{spec.name}.docker.out").write_text((cp.stdout or "") + (cp.stderr or ""))
         if cp.returncode == 0:
             return Outcome(True)
-        if cp.returncode == 124:
+        if cp.returncode == 124:   # run() reports its own timeout as rc 124
             return Outcome(False, "timeout", "build timed out")
         if "Unable to find image" in (cp.stderr or "") and "pull access denied" in (cp.stderr or ""):
             return Outcome(False, "image", (cp.stderr or "").strip().splitlines()[-1])
@@ -276,9 +302,18 @@ class Orchestrator:
 
     # -- helpers
     def pick_jdk(self, need: int) -> int:
+        # DECISION: which JDK builds this repo. Take the SMALLEST supported JDK that is >= the version the
+        # build declares (needs 18 -> JDK 21, needs 8 -> JDK 11): closest to what the project tests against.
+        # If the project needs more than the newest JDK we have, use the newest; plan() adds a warning note.
         return next((j for j in self.jdks if j >= need), self.jdks[-1])
 
     def pick_image(self, tool: str, wrapper: bool, jdk: int) -> str:
+        # DECISION: which container image runs the build (keys in config/images.env).
+        #   Maven (with or without mvnw)  -> MAVEN_IMAGE_<jdk>   maven:<ver>-eclipse-temurin-<jdk>
+        #                                    (mvnw, if present, still downloads the Maven version it pins)
+        #   Gradle WITH gradlew           -> JDK_IMAGE_<jdk>     plain eclipse-temurin; the wrapper fetches
+        #                                    the exact Gradle version the project pins
+        #   Gradle WITHOUT gradlew        -> GRADLE_IMAGE_<jdk>  image that ships a Gradle binary
         key = f"MAVEN_IMAGE_{jdk}" if tool == "maven" else f"JDK_IMAGE_{jdk}" if wrapper else f"GRADLE_IMAGE_{jdk}"
         img = self.images.get(key)
         if not img:
@@ -292,6 +327,8 @@ class Orchestrator:
         build = read_json(self.results / f"{name}.build.json")
         if build is None and (self.results / f"{name}.build.json").exists():
             facts.setdefault("notes", []).append("build.json from the build pod was unreadable")
+        # Merge order matters: build.sh's measurements first, then the orchestrator's facts on top, so
+        # facts the orchestrator knows better (repo, commit, ok, failure_kind) win on any clash.
         merged = {**(build or {}), **facts}
         merged.setdefault("rc", 0 if merged.get("ok") else 1)
         write_json_atomic(self.result_path(name), merged)
@@ -304,6 +341,11 @@ class Orchestrator:
         net_errors = ("Could not resolve host", "Connection timed out", "Connection reset", "early EOF",
                       "RPC failed", "Failed to connect", "HTTP 429", "HTTP 5", "unable to access")
         t0 = time.time()
+        # DECISION: how to clone.
+        #   no ref         -> shallow clone (--depth 1) of the default branch: fastest
+        #   ref given      -> shallow clone of that branch/tag; if git rejects it, the ref is probably a commit
+        #                     SHA (--branch can't take one), so fall back to a full clone + checkout
+        # Only the network errors listed above are retried; "repository not found" fails at once.
         if spec.ref:
             try:
                 run(["git", "clone", "-q", "--depth", "1", "--branch", spec.ref, spec.url, str(dest)],
@@ -324,9 +366,12 @@ class Orchestrator:
         workdir = self.repos_dir / spec.name / spec.subdir if spec.subdir else self.repos_dir / spec.name
         if not workdir.is_dir():
             raise JbpError(f"subdir {spec.subdir!r} does not exist in the repo")
+        # DETECT: parse build files to find the tool, wrapper and required Java version (see detect.py).
+        # A tool=... override in repos.txt is passed in and skips tool detection.
         d = detect(workdir, spec.tool)
         if d.tool == "unknown":
             raise JbpError("no Maven or Gradle build found (" + "; ".join(d.notes) + ")")
+        # DECISION: a java=N override in repos.txt always beats what detection found in the build files.
         java, source = (spec.java, "override in repos.txt") if spec.java else (d.java, d.source)
         jdk = self.pick_jdk(java)
         notes = list(d.notes)
@@ -350,6 +395,8 @@ class Orchestrator:
         facts.update(launch_ms=t0, done_ms=t1, job_wall_s=round((t1 - t0) / 1000, 1), ok=outcome.ok,
                      attempts=outcome.attempts)
         if not outcome.ok:
+            # Report where it failed: "build" = the build itself ran and failed or timed out;
+            # "launch" = it never really ran (image pull, scheduling, lost API contact).
             facts.update(stage="build" if outcome.failure_kind in ("build", "timeout") else "launch",
                          failure_kind=outcome.failure_kind, failure_message=outcome.message[:500])
         self.save_result(spec.name, facts)
@@ -372,10 +419,16 @@ class Orchestrator:
                  self.run_id, total, self.cfg.get("LAUNCHER", "k8s"), self.cfg["MAX_PARALLEL"],
                  self.cfg["BUILD_CPU"], self.cfg["BUILD_MEM"], self.cfg["DEP_CACHE"])
         parallel = max(1, self.cfg.int("MAX_PARALLEL", 1))
+        # MAX_PARALLEL > 1 only overlaps the build Jobs; clone and detect stay sequential in this thread.
+        # All build pods must fit on the PVC's node (RWO volume + podAffinity), so keep
+        # MAX_PARALLEL x BUILD_CPU below the node's allocatable CPU.
         pool = ThreadPoolExecutor(max_workers=parallel) if parallel > 1 else None
         futures = []
         for i, spec in enumerate(specs, 1):
             rlog = repo_logger(log, spec.name, "CLONE")
+            # DECISION: resume after a restart (spot reclaim kills this pod; the Job starts a new one).
+            # A repo whose result file says it passed is skipped; one that failed is cleaned and retried.
+            # SKIP_DONE=0 rebuilds everything.
             prev = read_json(self.result_path(spec.name)) if self.cfg.get("SKIP_DONE", "1") == "1" else None
             if prev and prev.get("ok"):
                 rlog.extra["stage"] = "SKIPPED"
@@ -434,6 +487,8 @@ class Orchestrator:
         s = self.tracker.summary()
         self.tracker.phase("ORCHESTRATE", "ok", **{k: s[k] for k in ("passed", "failed")})
         log.info("finished: %d passed, %d failed, %d total", s["passed"], s["failed"], total)
+        # Exit 0 even if repos failed: failed builds are results for the report, not a crash. A non-zero
+        # exit is reserved for the orchestrator itself breaking, which the driver then reports.
         (self.results / "_orchestrator_done").write_text(utc_iso() + "\n")
         return 0
 
@@ -447,6 +502,8 @@ def main() -> int:
     ws = Path(cfg.get("WORKSPACE", "/workspace"))
     setup_logging("orchestrator", ws / "results" / "orchestrator.log", verbose=os.environ.get("VERBOSE") == "1")
 
+    # Kubernetes sends SIGTERM when it evicts the pod (spot reclaim, node drain). Exit cleanly with 143;
+    # the Job's podFailurePolicy (DisruptionTarget -> Ignore) then starts a new pod, which resumes.
     def on_term(signum, _frame):
         log.warning("received signal %s: stopping; a restart resumes from the first repo without a result", signum)
         sys.exit(143)

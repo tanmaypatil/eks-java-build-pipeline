@@ -70,6 +70,8 @@ class Settings(dict):
     def load(cls, path: Path | str | None = None, environ: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if environ is None else environ
         s = cls(read_env_file(path or ROOT / "config" / "settings.env"))
+        # Only keys that exist in the file can be overridden from the environment, so an unrelated env var
+        # with a matching-looking name can't silently change a run.
         for k in list(s):
             if k in env:
                 s[k] = env[k]
@@ -181,6 +183,8 @@ def run(cmd: Sequence[str], *, log: logging.Logger | logging.LoggerAdapter | Non
         if cp.returncode == 0 or not check:
             return cp
         out = (cp.stderr or "") + (cp.stdout or "")
+        # DECISION: retry? Only while attempts remain AND (if retry_on was given) the output contains one of
+        # those substrings. This lets git clone retry on "Connection reset" but fail at once on "not found".
         retryable = attempt <= retries and (not retry_on or any(s in out for s in retry_on))
         if not retryable:
             raise CommandError(cmd, cp.returncode, cp.stdout, cp.stderr)
@@ -237,6 +241,8 @@ class StageTracker:
     def __init__(self, status_file: Path | str, events_file: Path | str, run_id: str, component: str):
         self.status_file, self.events_file = Path(status_file), Path(events_file)
         self._lock = threading.Lock()
+        # Same run id as the existing status file = this is a restart (e.g. after a spot reclaim):
+        # keep the earlier start time and per-repo state instead of starting from a blank picture.
         prev = read_json(self.status_file, {}) or {}
         self.state = {
             "run_id": run_id,

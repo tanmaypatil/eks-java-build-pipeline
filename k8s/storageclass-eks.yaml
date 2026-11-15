@@ -1,10 +1,18 @@
-# gp3 for the workspace. Volumes are tagged so bin/down.sh can find any that leak.
+# StorageClass for the workspace PVC on EKS. Applied by `jbp up` (cluster.up); cluster-wide, no namespace.
+# EKS ships without a default StorageClass, so without this one the PVC would stay Pending forever.
+# Volumes are tagged so `jbp leftovers` / cluster.leftovers() can find any that leak after teardown.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata: {name: jbp-gp3}
+# The AWS EBS CSI driver (installed as an eksctl add-on) creates and deletes the EBS volumes.
 provisioner: ebs.csi.aws.com
+# Create the volume only when the first pod using the PVC is scheduled. An EBS volume lives in ONE
+# availability zone; creating it up front could put it in a zone with no node, and no pod could mount it.
 volumeBindingMode: WaitForFirstConsumer
+# Deleting the PVC deletes the EBS volume. That is why `jbp down` deletes the namespace before the cluster.
 reclaimPolicy: Delete
 parameters:
+  # gp3: cheaper than gp2, with a 3000 IOPS / 125 MB/s baseline at any size (gp2 scales IOPS with size).
   type: gp3
+  # Tag every volume jbp-cluster=<cluster name>; the leftovers check searches for this tag.
   tagSpecification_1: "jbp-cluster=__CLUSTER_NAME__"
