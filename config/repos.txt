@@ -1,4 +1,6 @@
 # name             url                                                       ref(-=default)  subdir(-=root)  overrides (tool=maven|gradle java=N)
+# ref: branch, tag or commit SHA (a SHA triggers a full clone). subdir: where pom.xml/build.gradle lives.
+# Overrides skip detection: tool=gradle forces Gradle; java=21 forces the Java version (and so the image).
 # One repo per line. Each is cloned (one by one) onto the shared PVC, then built in a matching image.
 # Synthetic benchmark projects (Maven, Java 17/21/25, 30 -> 6000 classes)
 perf-p1-tiny-j17     https://github.com/tanmaypatil/perf-p1-tiny-j17.git    -   -

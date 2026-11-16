@@ -80,6 +80,8 @@ def apply(text: str) -> None:
 
 
 def configmap(cfg, name: str, files: dict[str, str | Path]) -> None:
+    # "create --dry-run=client -o yaml" only renders the ConfigMap; piping it to "apply" makes this
+    # create-or-update, so re-running a deploy never fails with "already exists".
     args = ["kubectl", "-n", cfg["NAMESPACE"], "create", "configmap", name, "--dry-run=client", "-o", "yaml"]
     args += [f"--from-file={key}={path}" for key, path in files.items()]
     apply(run(args, log=log).stdout)
@@ -90,12 +92,16 @@ def run_on_cluster(cfg: Settings, r: Run, repos: Path) -> bool:
     ns = cfg["NAMESPACE"]
     ctx = run(["kubectl", "config", "current-context"], log=log, timeout=20).stdout.strip()
     log.info("run %s on kube context %s, namespace %s, repos %s", r.id, ctx, ns, repos)
+    # Values for the __NAME__ placeholders in k8s/*.yaml. STORAGE_CLASS_LINE is a whole YAML line, so when
+    # no class is set the field disappears and the cluster's default StorageClass is used.
     values = {**cfg, "RUN_ID": r.id,
               "STORAGE_CLASS_LINE": f"storageClassName: {cfg['STORAGE_CLASS']}" if cfg["STORAGE_CLASS"] else ""}
 
     r.phase("DEPLOY")
     (r.dir / "settings.effective.env").write_text(effective_settings_text(cfg))
     apply(run(["kubectl", "create", "namespace", ns, "--dry-run=client", "-o", "yaml"], log=log).stdout)
+    # Ship our code as a ConfigMap mounted at /app: stock images (alpine/k8s, maven, temurin) can then run
+    # it, so the project never has to build or push an image of its own.
     code = {p.name: p for p in PIPE.glob("*.py")}
     code["build.sh"] = PIPE / "build.sh"
     configmap(cfg, "jbp-code", code)
@@ -104,6 +110,7 @@ def run_on_cluster(cfg: Settings, r: Run, repos: Path) -> bool:
     configmap(cfg, "jbp-templates", {"build-job.tpl.yaml": ROOT / "k8s" / "build-job.tpl.yaml"})
     apply(render(ROOT / "k8s" / "rbac.yaml", values))
     apply(render(ROOT / "k8s" / "pvc.yaml", values))
+    # Remove the previous run's Jobs/pod first: a Job's template can't be changed by "apply".
     for obj in (["job", "jbp-orchestrator"], ["pod", "jbp-collector"]):
         k(cfg, "delete", *obj, "--ignore-not-found", "--wait=true", timeout=180)
     k(cfg, "delete", "jobs", "-l", "app=jbp-build", "--ignore-not-found", timeout=180)
@@ -146,6 +153,8 @@ def follow_orchestrator(cfg: Settings, r: Run) -> bool:
                 log.info("orchestrator pod: %s", st)
             done.wait(10)
 
+    # The log stream (thread) is only for watching. The Job's Complete/Failed condition, polled below, is
+    # what decides the outcome, so a dropped log stream can never end the run early.
     t = threading.Thread(target=stream, daemon=True)
     t.start()
     result = None
@@ -169,6 +178,8 @@ def follow_orchestrator(cfg: Settings, r: Run) -> bool:
 
 
 def collect(cfg: Settings, r: Run, values: dict) -> None:
+    # The orchestrator pod has exited by now and "kubectl cp" needs a running container, so start a
+    # short-lived pod that mounts the same PVC and copy the results out of it.
     apply(render(ROOT / "k8s" / "collector-pod.yaml", values))
     k(cfg, "wait", "--for=condition=Ready", "pod/jbp-collector", "--timeout=300s", timeout=330, retries=1)
     k(cfg, "cp", "jbp-collector:/workspace/results", str(r.dir / "results"), timeout=600, retries=2)
@@ -187,6 +198,8 @@ def make_report(r: Run, cfg: Settings) -> Path | None:
                 "INSTANCE_TYPES", "NODE_COUNT", "AWS_REGION"):
         meta[key] = cfg.get(key, "")
     (r.dir / "run.env").write_text("".join(f"{k}={v}\n" for k, v in meta.items()))
+    # Run the report as a separate process: a bug in it must not crash the driver (cmd_all calls this
+    # from its teardown path).
     cp = run([sys.executable, str(ROOT / "report" / "make_report.py"), str(r.dir)], log=log, check=False, timeout=120)
     if cp.returncode != 0:
         log.error("report failed: %s", (cp.stderr or cp.stdout).strip()[-500:])
@@ -216,6 +229,9 @@ def cmd_down(cfg, r, args):
 
 def cmd_run(cfg, r, args):
     cfg["_context"] = run(["kubectl", "config", "current-context"], log=log, check=False).stdout.strip()
+    # DECISION: which StorageClass the workspace PVC uses. An explicit STORAGE_CLASS wins. Otherwise, if
+    # the jbp-gp3 class from `jbp up` exists (an EKS cluster), use it. Otherwise leave it empty so the
+    # cluster default is used (kind: "standard").
     if not cfg["STORAGE_CLASS"] and run(["kubectl", "get", "storageclass", "jbp-gp3"], log=log, check=False,
                                         timeout=30).returncode == 0:
         # EKS has no default StorageClass, so a PVC without one stays Pending forever
@@ -230,11 +246,13 @@ def cmd_run(cfg, r, args):
 
 def cmd_all(cfg, r, args):
     require_tools("aws", "eksctl", "kubectl")
-    cfg["STORAGE_CLASS"] = cfg["STORAGE_CLASS"] or "jbp-gp3"
+    cfg["STORAGE_CLASS"] = cfg["STORAGE_CLASS"] or "jbp-gp3"   # `jbp all` always creates the EKS cluster
     (r.dir / "cluster.env").write_text(f"INSTANCE_TYPES={cfg['INSTANCE_TYPES']}\nNODE_COUNT={cfg['NODE_COUNT']}\n"
                                        f"AWS_REGION={cfg['AWS_REGION']}\n")
     interrupted = {"sig": None}
 
+    # Turn SIGTERM (e.g. the session being stopped) into KeyboardInterrupt, so it takes the same path as
+    # Ctrl-C and the finally block below still tears the cluster down.
     def on_signal(signum, _f):
         interrupted["sig"] = signum
         raise KeyboardInterrupt
@@ -246,6 +264,8 @@ def cmd_all(cfg, r, args):
         log.warning("interrupted: tearing down now")
         raise
     finally:
+        # Teardown ALWAYS runs (success, error, Ctrl-C, SIGTERM) unless --keep: a forgotten EKS cluster
+        # costs ~$75/month idle. Teardown errors are logged, not raised, so the report still gets written.
         if args.keep:
             log.warning("--keep: cluster %s left running (~$0.10/h + node). Run `jbp down` when finished.", cfg["CLUSTER_NAME"])
         else:
@@ -268,6 +288,8 @@ def cmd_status(cfg, r, args):
     status = None
     pod = run(["kubectl", "-n", cfg["NAMESPACE"], "get", "pods", "-l", "job-name=jbp-orchestrator", "-o",
                "jsonpath={.items[-1:].metadata.name}"], log=log, check=False, timeout=20).stdout.strip()
+    # Where to read the orchestrator's progress from, best first: live from the running pod, then from
+    # results already collected, then from a local-docker workspace.
     if pod:
         cp = run(["kubectl", "-n", cfg["NAMESPACE"], "exec", pod, "--", "cat", "/workspace/results/_status.json"],
                  log=log, check=False, timeout=30)
@@ -374,6 +396,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     cfg = Settings.load()
+    # Read-only commands don't create a run folder; everything else gets runs/<RUN_ID>/ with its own log.
     if args.cmd in ("status", "report"):
         setup_logging("driver", verbose=args.verbose)
         r = None
@@ -386,6 +409,8 @@ def main(argv=None) -> int:
                "leftovers": cmd_leftovers, "local-docker": cmd_local_docker, "local-kind": cmd_local_kind,
                "report": cmd_report}[args.cmd]
     t0 = time.time()
+    # Exit codes: 0 ok, 1 expected failure (JbpError: message only, no traceback), 130 interrupted.
+    # Any other exception is a bug and is allowed to show its traceback.
     try:
         handler(cfg, r, args)
     except KeyboardInterrupt:

@@ -43,8 +43,10 @@ def normalise(v: str | None) -> int | None:
     if not m:
         return None
     major = int(m.group(1))
+    # Old Java versions were written "1.N" (1.8 = Java 8); from Java 9 on, just "N".
     if major == 1 and m.group(2):
         major = int(m.group(2))
+    # Sanity range: rejects stray numbers (e.g. "3" from a plugin version) being read as a Java version.
     return major if 6 <= major <= 99 else None
 
 
@@ -61,6 +63,8 @@ def _walk(root: Path, names: set[str] | None = None, suffixes: tuple[str, ...] =
 # --------------------------------------------------------------------------- version files
 
 def from_version_files(root: Path) -> tuple[int, str] | None:
+    # These files are someone explicitly saying "use Java N" (jenv, SDKMAN, asdf, Maven's .mvn/jdk), so they
+    # are checked first and beat anything inferred from build scripts. Order = priority; first hit wins.
     checks = [
         (".java-version", lambda t: t.strip().splitlines()[0] if t.strip() else None),
         (".sdkmanrc", lambda t: next((l.split("=", 1)[1] for l in t.splitlines() if l.startswith("java=")), None)),
@@ -96,6 +100,8 @@ class Pom:
         par = self.root.find("parent")
         if par is None:
             return None
+        # Maven's default parent location is ../pom.xml. An explicit empty <relativePath/> means
+        # "parent comes from a repository" (e.g. spring-boot-starter-parent), which we can't read offline.
         rel = (par.findtext("relativePath") or "../pom.xml").strip()
         if not rel:
             return None
@@ -104,6 +110,7 @@ class Pom:
         return p.resolve() if p.is_file() else None
 
     def prop(self, name: str) -> str | None:
+        # Like Maven: a property defined in this POM wins, otherwise inherit it from the parent chain.
         pom: Pom | None = self
         while pom:
             if name in pom.props:
@@ -112,6 +119,8 @@ class Pom:
         return None
 
     def resolve(self, value: str | None, depth: int = 0) -> str | None:
+        # Expand ${name} recursively (a property can point at another property). The depth limit stops a
+        # cycle like a=${b}, b=${a} from looping forever. Unresolvable references are left as they are.
         if value is None or depth > 10:
             return value
         def sub(m):
@@ -137,6 +146,7 @@ def from_maven(root: Path, notes: list[str]) -> tuple[int, str] | None:
             poms[p.resolve()] = Pom(p)
         except ET.ParseError as e:
             notes.append(f"could not parse {p.relative_to(root)}: {e}")
+    # Link each POM to its parent so a ${java.version} set once in the parent resolves in every module.
     for pom in poms.values():  # link local parents so ${java.version} defined in a parent resolves
         pp = pom.parent_path()
         if pp and pp in poms:
@@ -147,6 +157,12 @@ def from_maven(root: Path, notes: list[str]) -> tuple[int, str] | None:
             except (ET.ParseError, OSError):
                 pass
 
+    # DECISION: which Maven setting says the Java version. Most specific first:
+    #   release  - the exact Java API level javac compiles against (Java 9+); the best signal
+    #   java.version - Spring Boot's convention, feeds release/source/target in the Boot parent
+    #   target   - bytecode level; source - language level (older builds set only these)
+    # For the first rule with any hit, take the HIGHEST value across all modules: one JDK must build
+    # every module, so it has to satisfy the most demanding one.
     rules = [
         ("maven.compiler.release", lambda pom: [pom.prop("maven.compiler.release")]),
         ("compiler plugin <release>", lambda pom: pom.compiler_config("release")),
@@ -167,6 +183,7 @@ def from_maven(root: Path, notes: list[str]) -> tuple[int, str] | None:
                     notes.append(f"{label}={raw!r} in {pom.path.relative_to(root)} could not be resolved")
         if found:
             return max(found), label
+    # Last resort for Maven: a project-local toolchains file naming the JDK(s) it wants.
     tc = root / ".mvn" / "toolchains.xml"
     if tc.is_file():
         try:
@@ -181,6 +198,10 @@ def from_maven(root: Path, notes: list[str]) -> tuple[int, str] | None:
 
 # --------------------------------------------------------------------------- gradle
 
+# DECISION: Gradle scripts are Groovy/Kotlin code and can't be evaluated without running Gradle, so these
+# regexes look for the common ways a build states its Java version, most authoritative first:
+# toolchain (Gradle downloads/selects that JDK) > jvmToolchain (Kotlin) > --release > JavaVersion enum >
+# source/targetCompatibility > a version property in gradle.properties.
 GRADLE_RULES = [
     ("toolchain languageVersion", r"JavaLanguageVersion\.of\(\s*(\d+)"),
     ("jvmToolchain", r"jvmToolchain\(\s*(\d+)"),
@@ -210,6 +231,8 @@ def detect(repo_dir: str | Path, force_tool: str | None = None) -> Detection:
         raise FileNotFoundError(f"not a directory: {root}")
     notes: list[str] = []
     has = lambda *names: any((root / n).is_file() for n in names)
+    # DECISION: build tool. An override from repos.txt wins; else pom.xml -> Maven; else any Gradle build
+    # or settings script -> Gradle. Only the build root is checked (repos.txt "subdir" moves the root).
     if force_tool:
         tool = force_tool
     elif has("pom.xml"):
@@ -221,8 +244,12 @@ def detect(repo_dir: str | Path, force_tool: str | None = None) -> Detection:
         notes.append("no pom.xml or build.gradle(.kts) at the build root")
     if has("pom.xml") and has("build.gradle", "build.gradle.kts") and not force_tool:
         notes.append("repo has both Maven and Gradle builds; using Maven (set tool=gradle to override)")
+    # Wrapper present? It decides the image later (Gradle + gradlew -> plain JDK image) and build.sh
+    # then runs ./mvnw or ./gradlew so the project's pinned tool version is used.
     wrapper = has("mvnw") if tool == "maven" else has("gradlew") if tool == "gradle" else False
 
+    # DECISION: Java version. Explicit version files first, then the build tool's own settings,
+    # then DEFAULT_JAVA (17) when nothing is declared anywhere.
     hit = from_version_files(root)
     if not hit and tool == "maven":
         hit = from_maven(root, notes)

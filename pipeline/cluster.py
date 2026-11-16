@@ -35,10 +35,13 @@ def cluster_exists(cfg: Settings) -> bool:
 
 
 def pick_version(cfg: Settings) -> str:
+    # DECISION: Kubernetes version. "auto" = newest version still in STANDARD support. A version in
+    # extended support bills the control plane at $0.60/h instead of $0.10/h.
     if cfg["K8S_VERSION"] != "auto":
         return cfg["K8S_VERSION"]
     out = aws(cfg, "eks", "describe-cluster-versions", "--version-status", "STANDARD_SUPPORT",
               "--query", "clusterVersions[].clusterVersion", "--output", "json", timeout=60).stdout
+    # Sort numerically, not as text, so "1.10" comes after "1.9".
     versions = sorted(json.loads(out), key=lambda v: tuple(int(x) for x in v.split(".")))
     if not versions:
         raise JbpError("AWS listed no EKS versions in standard support; set K8S_VERSION")
@@ -59,6 +62,7 @@ def available_instance_types(cfg: Settings) -> list[str]:
     zones: dict[str, set] = {}
     for itype, az in json.loads(out):
         zones.setdefault(itype, set()).add(az)
+    # EKS needs subnets in at least 2 AZs, so a type offered in only one AZ is useless here.
     keep = [t for t in wanted if len(zones.get(t, ())) >= 2]
     dropped = [t for t in wanted if t not in keep]
     if dropped:
@@ -115,6 +119,8 @@ managedNodeGroups:
 def up(cfg: Settings, tracker: StageTracker | None = None) -> None:
     check_credentials(cfg)
     name = cfg["CLUSTER_NAME"]
+    # DECISION: reuse an existing cluster of the same name (e.g. after `jbp all --keep`) instead of
+    # failing; creating one takes 15-20 minutes.
     if cluster_exists(cfg):
         log.info("cluster %s already exists, reusing it", name)
     else:
@@ -132,6 +138,7 @@ def up(cfg: Settings, tracker: StageTracker | None = None) -> None:
             raise JbpError("eksctl create cluster failed (see log above); `jbp down` cleans up partial resources")
         log.info("cluster created in %s", fmt_duration(time.time() - t0))
     run(["aws", "eks", "update-kubeconfig", "--name", name, "--region", cfg["AWS_REGION"]], log=log, timeout=60)
+    # EKS has no default StorageClass; without jbp-gp3 the workspace PVC would stay Pending forever.
     sc = (ROOT / "k8s" / "storageclass-eks.yaml").read_text().replace("__CLUSTER_NAME__", name)
     run(["kubectl", "apply", "-f", "-"], input=sc, log=log, retries=3, timeout=60)
     nodes = json.loads(run(["kubectl", "get", "nodes", "-o", "json"], log=log, timeout=60).stdout)["items"]
@@ -148,6 +155,9 @@ def down(cfg: Settings) -> bool:
     if cluster_exists(cfg):
         try:
             run(["aws", "eks", "update-kubeconfig", "--name", name, "--region", cfg["AWS_REGION"]], log=log, timeout=60)
+            # ORDER MATTERS: delete the namespace (and with it the PVC) while the EBS CSI driver still runs,
+            # so the driver deletes the volume (reclaimPolicy: Delete). If the cluster went first, the
+            # volume would be orphaned and keep billing.
             log.info("deleting namespace %s first, so the PVC's EBS volume is released", cfg["NAMESPACE"])
             run(["kubectl", "delete", "namespace", cfg["NAMESPACE"], "--ignore-not-found", "--wait=true"],
                 log=log, timeout=300)
@@ -156,6 +166,8 @@ def down(cfg: Settings) -> bool:
         log.info("deleting cluster %s (~10 min: node group, then control plane, then VPC)", name)
         t0 = time.time()
         try:
+            # --disable-nodegroup-eviction: nothing on the node needs a graceful drain, and skipping it
+            # saves minutes.
             run_streaming(["eksctl", "delete", "cluster", "--name", name, "--region", cfg["AWS_REGION"], "--wait",
                            "--disable-nodegroup-eviction"], log=log, prefix="eksctl: ", timeout=2700)
         except (CommandError, JbpError) as e:
@@ -163,6 +175,7 @@ def down(cfg: Settings) -> bool:
         log.info("eksctl finished after %s; verifying", fmt_duration(time.time() - t0))
     else:
         log.info("cluster %s not found", name)
+    # Don't trust eksctl's exit code alone: poll AWS until nothing billable is left.
     return wait_until_clean(cfg)
 
 

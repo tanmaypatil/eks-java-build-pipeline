@@ -1,3 +1,5 @@
+# The orchestrator: one pod that, for each repo in repos.txt, clones it onto the PVC, detects its build
+# tool and Java version, and creates + watches a build Job (pipeline/orchestrator.py). Applied by `jbp run`.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -5,29 +7,40 @@ metadata:
   namespace: __NAMESPACE__
   labels: {app: jbp-orchestrator, jbp/run: "__RUN_ID__"}
 spec:
+  # No blind retries: if orchestrator.py itself exits non-zero, the Job fails at once and the driver says so.
   backoffLimit: 0
+  # No activeDeadlineSeconds: run length depends on the repo list; the driver stops waiting after 6 h.
   podFailurePolicy:
     rules:
-      - action: Ignore      # spot reclaim: rerun; repos already built are skipped (SKIP_DONE=1)
+      # DisruptionTarget is set when Kubernetes evicts the pod (spot reclaim, node drain, preemption).
+      # Ignore = don't count it against backoffLimit; the Job starts a new pod, which skips repos that
+      # already passed (SKIP_DONE=1) and resumes. Requires restartPolicy: Never.
+      - action: Ignore
         onPodConditions: [{type: DisruptionTarget}]
   template:
     metadata:
+      # Build Jobs' podAffinity selects this label to land on the same node (the PVC is ReadWriteOnce).
       labels: {app: jbp-orchestrator, jbp/run: "__RUN_ID__"}
     spec:
+      # Runs with the limited permissions from rbac.yaml.
       serviceAccountName: jbp-orchestrator
       restartPolicy: Never
       containers:
         - name: orchestrator
+          # ORCH_IMAGE (alpine/k8s): ships kubectl, git and python3, so no custom image is needed.
           image: __ORCH_IMAGE__
+          # -u = unbuffered, so `kubectl logs -f` in the driver shows each line as it happens.
           command: ["python3", "-u", "/app/orchestrator.py"]
           env:
-            - {name: LAUNCHER, value: k8s}
+            - {name: LAUNCHER, value: k8s}   # create build Jobs (the alternative, docker, is for local runs)
             - {name: RUN_ID, value: "__RUN_ID__"}
             - {name: SETTINGS_FILE, value: /config/settings.env}   # effective settings from the driver
-            - {name: IMAGES_FILE, value: /config/images.env}
+            - {name: IMAGES_FILE, value: /config/images.env}       # JDK -> image map
             - {name: REPOS_FILE, value: /config/repos.txt}
             - {name: TEMPLATE, value: /templates/build-job.tpl.yaml}
             - {name: WORKSPACE, value: /workspace}
+          # Small request: it mostly sleeps and polls the API. Memory limit as a guard against runaway use;
+          # no CPU limit, so it is never throttled while builds run next to it.
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {memory: 512Mi}
@@ -36,8 +49,10 @@ spec:
             - {name: code, mountPath: /app, readOnly: true}
             - {name: config, mountPath: /config, readOnly: true}
             - {name: templates, mountPath: /templates, readOnly: true}
+      # The three ConfigMaps are created by the driver from the repo's files on every `jbp run`,
+      # so code or config changes take effect without building an image.
       volumes:
         - {name: workspace, persistentVolumeClaim: {claimName: jbp-workspace}}
-        - {name: code, configMap: {name: jbp-code}}
-        - {name: config, configMap: {name: jbp-config}}
-        - {name: templates, configMap: {name: jbp-templates}}
+        - {name: code, configMap: {name: jbp-code}}             # pipeline/*.py + build.sh
+        - {name: config, configMap: {name: jbp-config}}         # repos.txt, images.env, settings.env
+        - {name: templates, configMap: {name: jbp-templates}}   # build-job.tpl.yaml

@@ -70,6 +70,7 @@ for f in sorted(glob.glob(os.path.join(res_dir, "*.json"))):
     att = os.path.join(res_dir, name + ".attempts")
     r["attempts"] = int(open(att).read().strip() or 1) if os.path.exists(att) else 1
     r["log"] = "results/%s.build.log" % name if os.path.exists(os.path.join(res_dir, name + ".build.log")) else None
+    # PASS needs both: the orchestrator saw the Job succeed (ok) AND the build exited 0 (rc).
     r["passed"] = bool(r.get("ok")) and r.get("rc", 1) == 0
     rows.append(r)
 
@@ -98,6 +99,8 @@ nodes = int(cluster.get("NODE_COUNT", cfg.get("NODE_COUNT", 1)))
 disk = int(cfg.get("NODE_DISK_GB", 40))
 pvc = int(re.sub(r"\D", "", cfg.get("PVC_SIZE", "30Gi")) or 30)
 
+# Cost model: control plane billed per hour of cluster life; nodes, their EBS disks + the PVC, and one
+# public IPv4 per node billed per hour of node life. EBS is priced per GB-month (730 h).
 def cost(cp_s, node_s):
     h_cp, h_node = cp_s / 3600, node_s / 3600
     ebs = (nodes * disk + pvc) * P["PRICE_EBS_GB_MONTH"] / 730 * h_node
@@ -113,6 +116,8 @@ if up_s and p("down_end"):
     cp = p("down_end") - p("up_start")
     node_s = (p("down_start") - p("up_end")) + 6 * 60 + 3 * 60  # nodes start ~6 min before "up" ends, die ~3 min into teardown
     actual = cost(cp, node_s)
+# DECISION: show "actual" cost only when both up and down were timed (a `jbp all` run); otherwise show
+# only the projection.
 # projection for a typical ephemeral run of this workload: 18 min up, builds, 3 min collect, 12 min down
 work = run_wall or (build_total + clone_total)
 proj = cost(18 * 60 + work + 180 + 12 * 60, 6 * 60 + work + 180 + 3 * 60)

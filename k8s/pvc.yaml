@@ -1,7 +1,17 @@
+# The shared workspace every pod in a run mounts at /workspace:
+#   repos/    git clones (orchestrator writes, build pods read and build in place)
+#   cache/    Maven ~/.m2 and Gradle home shared across repos when DEP_CACHE=shared
+#   results/  build logs, <repo>.json results, _status.json progress (copied out by the collector pod)
+# It outlives every pod, which is what lets a restarted orchestrator resume and later repos reuse the cache.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: jbp-workspace, namespace: __NAMESPACE__}
 spec:
+  # ReadWriteOnce: an EBS volume attaches to ONE node at a time. Several pods may share it, but only on
+  # that node, which is why build Jobs use podAffinity to land next to the orchestrator.
   accessModes: [ReadWriteOnce]
+  # Replaced by the driver with "storageClassName: <STORAGE_CLASS>" (jbp-gp3 on EKS), or with nothing,
+  # in which case the cluster's default StorageClass is used (e.g. "standard" on kind).
   __STORAGE_CLASS_LINE__
+  # PVC_SIZE (default 30Gi): room for the clones, the dependency cache and results.
   resources: {requests: {storage: __PVC_SIZE__}}
