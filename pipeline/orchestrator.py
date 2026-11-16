@@ -280,6 +280,41 @@ class DockerLauncher:
 
 # --------------------------------------------------------------------------- the run
 
+def previous_run_id(results: Path) -> str | None:
+    """The run that wrote the files in results/, or None if it is empty."""
+    st = read_json(results / "_status.json")
+    if isinstance(st, dict) and st.get("run_id"):
+        return st["run_id"]
+    for f in sorted(results.glob("*.json")):
+        data = read_json(f)
+        if isinstance(data, dict) and data.get("run_id"):
+            return data["run_id"]
+    return None
+
+
+def archive_stale_results(ws: Path, run_id: str) -> str | None:
+    """Move results/ aside if a DIFFERENT run wrote it. Returns that run's id, or None.
+
+    DECISION: a restart is recognised by its RUN_ID, not by the mere presence of files. A pod restart
+    reuses the Job spec, so it has the same RUN_ID and resumes. A new run on a volume that survived
+    (jbp all --keep, then jbp run) has a new RUN_ID: its old results are kept in results.<old_id>/ but
+    never reused, so stale timings can't leak into an experiment.
+    """
+    results = ws / "results"
+    if not results.is_dir():
+        return None
+    old = previous_run_id(results)
+    if not old or old == run_id:
+        return None
+    dest = ws / f"results.{old}"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = ws / f"results.{old}.{n}"
+    results.rename(dest)
+    return old
+
+
 class Orchestrator:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
@@ -427,12 +462,19 @@ class Orchestrator:
         for i, spec in enumerate(specs, 1):
             rlog = repo_logger(log, spec.name, "CLONE")
             # DECISION: resume after a restart (spot reclaim kills this pod; the Job starts a new one).
-            # A repo whose result file says it passed is skipped; one that failed is cleaned and retried.
+            # A repo whose result file says it passed IN THIS RUN is skipped; one that failed is cleaned and
+            # retried. A result from another run is never trusted (see archive_stale_results).
             # SKIP_DONE=0 rebuilds everything.
             prev = read_json(self.result_path(spec.name)) if self.cfg.get("SKIP_DONE", "1") == "1" else None
+            if prev is not None and (not isinstance(prev, dict) or prev.get("run_id") != self.run_id):
+                rlog.warning("[%d/%d] ignoring a result left by run %s", i, total,
+                             prev.get("run_id") if isinstance(prev, dict) else "?")
+                for f in self.results.glob(f"{spec.name}.*"):
+                    f.unlink(missing_ok=True)
+                prev = None
             if prev and prev.get("ok"):
                 rlog.extra["stage"] = "SKIPPED"
-                rlog.info("[%d/%d] already passed in an earlier attempt of this run, skipping", i, total)
+                rlog.info("[%d/%d] already passed earlier in this run, skipping", i, total)
                 self.tracker.repo(spec.name, "SKIPPED", "skipped", result="PASS")
                 continue
             if prev:
@@ -500,7 +542,16 @@ def main() -> int:
         if k in os.environ:
             cfg[k] = os.environ[k]
     ws = Path(cfg.get("WORKSPACE", "/workspace"))
+    cfg["RUN_ID"] = cfg.get("RUN_ID") or time.strftime("%Y%m%d-%H%M%S")
+    # Before logging starts: the log file lives in results/, which may be moved aside.
+    stale = archive_stale_results(ws, cfg["RUN_ID"])
     setup_logging("orchestrator", ws / "results" / "orchestrator.log", verbose=os.environ.get("VERBOSE") == "1")
+    if stale:
+        log.warning("new run %s: results/ held files from run %s; moved to results.%s/ (not reused)",
+                    cfg["RUN_ID"], stale, stale)
+    else:
+        prev = previous_run_id(ws / "results")
+        log.info("%s run %s", "resuming" if prev == cfg["RUN_ID"] else "starting", cfg["RUN_ID"])
 
     # Kubernetes sends SIGTERM when it evicts the pod (spot reclaim, node drain). Exit cleanly with 143;
     # the Job's podFailurePolicy (DisruptionTarget -> Ignore) then starts a new pod, which resumes.
