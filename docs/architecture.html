@@ -283,7 +283,7 @@ IPv4           0.4 h × $0.005                                = $0.002
 <tr><td>Build hangs</td><td><code>activeDeadlineSeconds</code> kills it; the orchestrator also gives up at timeout + 10 min.</td></tr>
 <tr><td>Out of memory</td><td><code>oom_kills</code> &gt; 0 in the result. The pod's memory limit is the knob.</td></tr>
 <tr><td>Spot reclaim of the build pod</td><td><code>podFailurePolicy: Ignore</code> on <code>DisruptionTarget</code> retries it; the report shows "N tries".</td></tr>
-<tr><td>Spot reclaim of the orchestrator</td><td>Same policy restarts it; repos that already passed are skipped, failed ones are tried again.</td></tr>
+<tr><td>Spot reclaim of the orchestrator</td><td>Same policy restarts it with the same <code>RUN_ID</code>; repos that already passed in this run are skipped, failed ones are tried again. A new run on a surviving volume moves the old <code>results/</code> aside instead of reusing it.</td></tr>
 <tr><td>Maven Central rate limit (HTTP 429)</td><td>Shows up as a failed download (Gradle may say "Could not find"). We hit this from the sandbox. The fix is a mirror; see section 11.</td></tr>
 <tr><td>Driver dies mid-run (laptop off, Claude session ended)</td><td>The <code>finally</code> can't run: run <code>jbp down</code> (it verifies) or <code>jbp leftovers</code>. When Claude drives, it also schedules an independent leftovers check after the run.</td></tr>
 </table></div>
