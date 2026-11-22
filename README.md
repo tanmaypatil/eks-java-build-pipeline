@@ -4,6 +4,9 @@ Spin up a throwaway Kubernetes cluster on AWS, build a list of Java repos inside
 report, tear the cluster down. Built to make each run as cheap as possible first, so build
 optimisations (`-T1C`, JVM flags, caches, pod sizes) can be compared later on the same rig.
 
+**The experiment plan** (what we test, with exact pod sizes, repos and flags) is in
+[docs/experiments/](docs/experiments/README.md).
+
 ```
 ./jbp all
   ├─ UP           eksctl: EKS + 1 spot node (public subnets, no NAT) + EBS CSI            ~15-20 min

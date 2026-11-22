@@ -10,7 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "pipeline"))
 from jbpcore import Settings, StageTracker, read_env_file  # noqa: E402
-from orchestrator import K8sLauncher, Plan, RepoSpec, parse_repos  # noqa: E402
+from orchestrator import (K8sLauncher, Plan, RepoSpec, archive_stale_results, parse_repos,  # noqa: E402
+                          previous_run_id)
 
 
 def settings():
@@ -104,6 +105,45 @@ class TrackerTest(unittest.TestCase):
         # a restart with the same run id keeps earlier repo state (resume)
         t2 = StageTracker(d / "s.json", d / "e.jsonl", "r1", "orchestrator")
         self.assertIn("a", t2.state["repos"])
+
+
+class ResumeTest(unittest.TestCase):
+    """A restart (same RUN_ID) resumes; a new run never reuses another run's results (issue #8)."""
+
+    def workspace(self, run_id=None, repo_run_id=None):
+        ws = Path(tempfile.mkdtemp())
+        res = ws / "results"
+        res.mkdir()
+        if run_id:
+            (res / "_status.json").write_text(json.dumps({"run_id": run_id, "repos": {}}))
+        if repo_run_id:
+            (res / "p1.json").write_text(json.dumps({"repo": "p1", "ok": True, "run_id": repo_run_id}))
+        return ws
+
+    def test_same_run_is_resumed_in_place(self):
+        ws = self.workspace("run-A", "run-A")
+        self.assertIsNone(archive_stale_results(ws, "run-A"))
+        self.assertTrue((ws / "results" / "p1.json").exists())
+
+    def test_new_run_moves_old_results_aside(self):
+        ws = self.workspace("run-A", "run-A")
+        self.assertEqual(archive_stale_results(ws, "run-B"), "run-A")
+        self.assertFalse((ws / "results").exists())
+        self.assertTrue((ws / "results.run-A" / "p1.json").exists())
+
+    def test_archive_name_never_overwrites(self):
+        ws = self.workspace("run-A")
+        (ws / "results.run-A").mkdir()
+        archive_stale_results(ws, "run-B")
+        self.assertTrue((ws / "results.run-A.2" / "_status.json").exists())
+
+    def test_empty_or_missing_results_is_a_fresh_start(self):
+        self.assertIsNone(archive_stale_results(self.workspace(), "run-B"))
+        self.assertIsNone(archive_stale_results(Path(tempfile.mkdtemp()), "run-B"))
+
+    def test_run_id_falls_back_to_repo_result(self):
+        ws = self.workspace(repo_run_id="run-A")
+        self.assertEqual(previous_run_id(ws / "results"), "run-A")
 
 
 class SettingsTest(unittest.TestCase):

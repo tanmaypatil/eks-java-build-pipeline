@@ -1,0 +1,35 @@
+Rank,Experiment,Repos,Node,Pod (CPU / memory),Variants (exact flags),Command,Measure / check,Status,Effort,Measured locally,Expected benefit,EKS result
+1,Pod CPU size × Maven module parallelism,"p1 (single-module control), p3, p4, p5, p6","m6a.2xlarge spot (8 vCPU, 32 GiB) for every variant, so a 4-CPU pod fits","CPU 1 / 2 / 4 (request = limit), memory 4Gi","6 variants: BUILD_CPU=1|2|4 × MAVEN_ARGS_EXTRA="""" | ""-T1C""
+MAVEN_OPTS unset",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 [-T1C] verify,"build_s, avg_cores, throttled_pct; find where time stops dropping as CPU grows",Planned,Low,"p4: 101 s at 1 CPU, 50 s at 2, 29 s at 4. -T1C gave −45% on p6 with 4 CPUs but about 0% in a 2-CPU pod (52 s vs 51 s).",Biggest speed lever. Shows the right pod size for OpenShift; cost per build stays roughly flat while feedback gets about 2x faster per CPU doubling.,
+2,JIT tiering (stop at the fast C1 compiler),"p2, p4, p6, petclinic","m6a.xlarge spot (4 vCPU, 16 GiB)",2 / 4Gi,"A) MAVEN_OPTS unset
+B) MAVEN_OPTS=""-XX:TieredStopAtLevel=1""
+C) B + MAVEN_ARGS_EXTRA=""-DargLine=-XX:TieredStopAtLevel=1"" (forked test JVMs too)",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 verify,"build_s, cpu_s; test count must match A (petclinic's own argLine must not be lost)",Planned,Low,"p4: 31.4 s → 26.3 s in MAVEN_OPTS (−16%), 21.8 s with surefire argLine too (−30%). 1-CPU pod: 100 s → 79 s (−21%).","−15 to −30%, and it cuts CPU-seconds, so cost drops too. Best value for effort.",
+3,Incremental build cache,"p3, p5, p6 (re-add .mvn/extensions.xml with maven-build-cache-extension 1.2.0)",m6a.xlarge spot,2 / 4Gi,"1) extension off
+2) on, empty cache
+3) on, warm, no change
+4) on, warm, one leaf-module class edited
+5) on, warm, root-module class edited
+All: -Dmaven.build.cache.location=/workspace/cache/build-cache",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 verify,build_s; test count per variant (a cache hit skips surefire),Needs design,High,"p6: 108 s → 2.8 s with no changes (−97%), 10 s with a leaf module edited (−90%); a root-module edit gives no gain.","Largest number we have, for repeated builds of the same repo.",
+4,Test execution settings,"p2, p4, p5",m6a.xlarge spot,2 / 4Gi,"A) default (forkCount=1, reuseForks=true)
+B) -Djunit.jupiter.execution.parallel.enabled=true -Djunit.jupiter.execution.parallel.mode.classes.default=concurrent
+C) -DforkCount=2
+D) -DforkCount=1C -DreuseForks=false (anti-pattern reference, 1 rep only)
+All via MAVEN_ARGS_EXTRA",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 [flags] verify,build_s; test count and failures must match A,Planned,Low,"JUnit 5 parallel classes −5 to −12%. forkCount=1C +70 to 80%, reuseForks=false about 10x slower.",Modest gain; the real value is spotting the anti-patterns in real repos.,
+5,Dependency and Maven-wrapper cache: cold vs warm,all 8 in config/repos.txt,m6a.xlarge spot,2 / 4Gi,"1) DEP_CACHE=none (downloads everything)
+2) DEP_CACHE=shared, empty
+3) DEP_CACHE=shared, warm
+All with MAVEN_USER_HOME=/workspace/cache/m2-home and GRADLE_USER_HOME on the PVC",mvn -B -ntp -e [-Dmaven.repo.local=/workspace/cache/m2] verify (./mvnw or ./gradlew where present),"build_s, bytes downloaded (from the build log), any 429 errors",Blocked,Medium,Not measured on EKS. Maven Central returned 429s from the sandbox.,Removes download time and rate-limit failures; matters most for fresh OpenShift pods.,
+6,CPU requests vs limits,"p4, p6",m6a.2xlarge spot,"CPU request 2 with limit 2 / 4 / none, memory 4Gi","1) request 2, limit 2 (today)
+2) request 2, limit 4 (burstable)
+3) request 2, no limit
+All with MAVEN_ARGS_EXTRA=""-T1C""
+Needs separate CPU request and limit in the build Job template",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 -T1C verify,"build_s, throttled_pct, CPU count the JVM reports (ActiveProcessorCount)",Planned,Low,Not tested. Build pods use request = limit today.,Shows how the JVM sizes itself from the limit; relevant for OpenShift quotas.,
+7,javac fork check,"p4, then scan the real repos' pom.xml",m6a.xlarge spot,2 / 4Gi,"1) -Dmaven.compiler.fork=false (default)
+2) -Dmaven.compiler.fork=true",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 [flag] verify,build_s; list repos that set <fork>true</fork>,Planned,Low,p4: fork=true 61 s vs fork=false 29 s.,Detect and flag in real repos rather than tune.,
+8,Pod memory and the SerialGC threshold,"p4, p6",m6a.xlarge spot,"CPU 2, memory 1536Mi / 2Gi / 4Gi / 8Gi","BUILD_MEM=1536Mi (JVM picks SerialGC, under 1792 MB) | 2Gi | 4Gi | 8Gi",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 verify,"build_s, peak_mem_mib, oom_kills, GC the JVM picked",Later,Low,Not tested.,Below 1792 MB the JVM picks SerialGC and slows down; only that threshold is worth testing.,
+9,Image pre-pull,all 8,m6a.xlarge spot,2 / 4Gi,"1) cold node (first image pull)
+2) images pre-pulled by a DaemonSet",unchanged,startup_s (not build_s),Later,Medium,"EKS startup_s was 0 to 14 s, mostly the first pull of each image.","Saves about 10 to 30 s per new image, one-off.",
+10,Build daemon (mvnd),"p4, p6",m6a.xlarge spot,2 / 4Gi,"1) mvn 3.9.11
+2) mvnd 1.x in a custom image, one build per pod",mvnd -B -Dmaven.repo.local=/workspace/cache/m2 verify,build_s,Later,Medium,Could not run in the sandbox.,Helps repeated builds; little in one-shot pods.,
+11,Garbage collector choice,"p4, p6",m6a.xlarge spot,2 / 4Gi,MAVEN_OPTS unset (G1) | -XX:+UseParallelGC | -XX:+UseSerialGC,mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 verify,"build_s, peak_mem_mib",Deprioritised,Low,"p4: ParallelGC 28.5 s vs default 31.4 s, SerialGC 31.1 s.",Small; not worth a run of its own.,
+12,JDK version running Maven,p4 (Java 17 code),m6a.xlarge spot,2 / 4Gi,"image maven:3.9.11-eclipse-temurin-17 | -21 | -25, via java=17|21|25 override in repos.txt",mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 verify,build_s,Deprioritised,Low,p4: JDK 17 / 21 / 25 = 29.8 / 29.3 / 29.5 s.,No difference.,

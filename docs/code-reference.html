@@ -548,7 +548,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <li>If <code>MAX_PARALLEL &gt; 1</code>, creates a <code>ThreadPoolExecutor</code>.</li>
 <li>For each repo, in order:
  <ul>
- <li><b>Resume check</b> (<code>SKIP_DONE=1</code>, default): if <code>results/&lt;repo&gt;.json</code> exists and passed, mark SKIPPED and move on. If it exists and failed, delete that repo's result files and try again.</li>
+ <li><b>Resume check</b> (<code>SKIP_DONE=1</code>, default): if <code>results/&lt;repo&gt;.json</code> exists, passed, <b>and has this run's <code>run_id</code></b>, mark SKIPPED and move on. If it exists and failed, delete that repo's result files and try again. A result with another <code>run_id</code> is deleted and never reused.</li>
  <li>Start a <code>base</code> facts dict (repo, url, ref, run id, launcher, pod size, cache mode, start time).</li>
  <li><b>CLONE</b>: <a href="#or-clone"><code>clone()</code></a>; on error save a <code>failure_kind=clone</code> result, mark FAILED, continue.</li>
  <li><b>DETECT</b>: <a href="#or-plan"><code>plan()</code></a>; on error save <code>failure_kind=detect</code>, continue. Log the decision and each note as a warning; add the plan to <code>base</code>.</li>
@@ -562,6 +562,7 @@ public IPv4   = PRICE_IPV4_HOUR × nodes × node_hours</code></pre>
 <ol>
 <li><code>Settings.load(SETTINGS_FILE)</code>, which in the pod is the driver's effective settings from the ConfigMap. Then copies orchestrator-only env knobs that aren't in settings.env: <code>WORKSPACE, RUN_ID, LAUNCHER, IMAGES_FILE, TEMPLATE, REPOS_FILE, SKIP_DONE, PVC_NAME</code>.</li>
 <li>Logging to the console (which <code>kubectl logs</code> shows) and <code>results/orchestrator.log</code> on the PVC. <code>VERBOSE=1</code> for DEBUG.</li>
+<li><b>Restart or new run?</b> <code>archive_stale_results()</code> runs before logging starts. A pod restart reuses the Job spec, so it has the same <code>RUN_ID</code> as the files in <code>results/</code> and resumes in place. A different <code>RUN_ID</code> means a new run on a volume that survived (e.g. <code>jbp all --keep</code>, then <code>jbp run</code>): <code>results/</code> is moved to <code>results.&lt;old_id&gt;/</code> so old timings can't leak into a new experiment. The run's ID comes from <code>_status.json</code>, or any <code>&lt;repo&gt;.json</code> if that is missing.</li>
 <li>SIGTERM handler: logs that a restart will resume, exits 143. Kubernetes sends SIGTERM on a spot reclaim or node drain.</li>
 <li>Parses repos, logs problems, exits 2 if none are valid, else runs. <code>JbpError</code> → exit 2.</li>
 </ol></div>
