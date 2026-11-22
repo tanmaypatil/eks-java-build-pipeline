@@ -1,0 +1,14 @@
+Setting,Value used unless an experiment changes it
+Cluster,"EKS, region ap-south-1, Kubernetes version in standard support"
+Node,"1 spot node, m6a.xlarge (4 vCPU, 16 GiB); m6a.2xlarge (8 vCPU, 32 GiB) when a pod needs 4 CPUs"
+Build pod CPU,2 (request = limit)
+Build pod memory,4Gi (request = limit)
+Builds at a time,MAX_PARALLEL=1 (one build pod on the node)
+Build image,maven:3.9.11-eclipse-temurin-<JDK picked by detect.py> (Gradle with gradlew: eclipse-temurin:<JDK>-jdk)
+Maven command,mvn -B -ntp -e -Dmaven.repo.local=/workspace/cache/m2 verify
+MAVEN_OPTS / argLine,unset (JVM defaults)
+Dependency cache,"DEP_CACHE=shared on the PVC, warmed by one unmeasured pass first"
+Workspace volume,"EBS gp3 PVC, 3000 IOPS / 125 MB/s baseline"
+Repetitions,"3 per variant × repo, variant order shuffled each round"
+Correctness gate,Every repo passes with the same test count as the baseline
+Recorded per build,"build_s, cpu_s, avg_cores, throttled_pct, peak_mem_mib, oom_kills, tests, startup_s"

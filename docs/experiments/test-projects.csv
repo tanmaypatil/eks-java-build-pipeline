@@ -1,0 +1,9 @@
+Project,Repo,Java,Modules,Layer widths,Classes,Tests,"EKS build s (2 CPU, 15 Nov)",Notes
+p1 tiny,perf-p1-tiny-j17,17,1,1,30,276,10.2,Single module: -T can't help
+p2 small,perf-p2-small-j21,21,1,1,300,2760,19.5,"Single module, test-heavy"
+p3 medium,perf-p3-medium-j25,25,6,"1, 3, 2",480,4416,32.7,
+p4 medium,perf-p4-medium-j17,17,12,"1, 4, 4, 3",960,8832,56.2,Workhorse for most local experiments
+p5 large,perf-p5-large-j21,21,24,"2, 6, 8, 6, 2",2880,26496,130,
+p6 xlarge,perf-p6-xlarge-j25,25,40,"2, 8, 12, 10, 6, 2",6000,55200,229.7,Up to 12 modules can build side by side
+petclinic,spring-petclinic,17,1,1,,79,55,Real Spring Boot app (Maven wrapper)
+rest-svc-gradle,Gradle guide project,17,,,,2,36.6,Real Gradle build (gradlew)
