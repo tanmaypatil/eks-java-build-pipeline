@@ -49,8 +49,9 @@ def pick_version(cfg: Settings) -> str:
     return versions[-1]
 
 
-def available_instance_types(cfg: Settings) -> list[str]:
-    """INSTANCE_TYPES minus the ones this region doesn't offer in at least 2 AZs.
+def available_instance_types(cfg: Settings) -> tuple[list[str], list[str]]:
+    """INSTANCE_TYPES minus the ones this region doesn't offer in at least 2 AZs, and the AZs that offer
+    every type kept (sorted).
 
     eksctl drops every AZ that lacks *any* listed type, so one missing type (e.g. m7a in ap-south-1)
     makes cluster creation fail with "only 0 zones discovered".
@@ -76,13 +77,23 @@ def available_instance_types(cfg: Settings) -> list[str]:
         if len(common & zones[t]) >= 2:
             common &= zones[t]
             result.append(t)
-    return result
+    return result, sorted(common)
 
 
-def eksctl_config(cfg: Settings, version: str, instance_types: list[str] | None = None) -> str:
+def eksctl_config(cfg: Settings, version: str, instance_types: list[str] | None = None,
+                  zones: list[str] | None = None) -> str:
     instance_types = instance_types or [t.strip() for t in cfg["INSTANCE_TYPES"].split(",") if t.strip()]
     types = ", ".join(f'"{t}"' for t in instance_types)
     n = cfg.int("NODE_COUNT", 1)
+    # DECISION: pin the node group to ONE zone. The workspace PVC is an EBS volume, which lives in one
+    # zone; a spot replacement node started in another zone could never attach it, and the orchestrator
+    # would sit Pending until its deadline. The cluster itself still spans >= 2 zones (EKS requires it).
+    zones = zones or []
+    node_az = cfg.get("NODE_AZ", "") or (zones[0] if zones else "")
+    if node_az and zones and node_az not in zones:
+        raise JbpError(f"NODE_AZ={node_az} does not offer every instance type (choose from {', '.join(zones)})")
+    cluster_azs = f"availabilityZones: [{', '.join(zones)}]\n" if len(zones) >= 2 else ""
+    ng_az = f"\n    availabilityZones: [{node_az}]" if node_az else ""
     return f"""apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata:
@@ -90,7 +101,7 @@ metadata:
   region: {cfg['AWS_REGION']}
   version: "{version}"
   tags: {{project: java-build-perf, jbp-ephemeral: "true"}}
-iam:
+{cluster_azs}iam:
   withOIDC: true
 vpc:
   nat: {{gateway: Disable}}        # no NAT gateway (~$0.045/h + per GB): nodes use public subnets
@@ -112,7 +123,7 @@ managedNodeGroups:
     volumeSize: {cfg.int('NODE_DISK_GB', 40)}
     volumeType: gp3
     privateNetworking: false
-    labels: {{jbp/pool: build}}
+    labels: {{jbp/pool: build}}{ng_az}
 """
 
 
@@ -125,12 +136,12 @@ def up(cfg: Settings, tracker: StageTracker | None = None) -> None:
         log.info("cluster %s already exists, reusing it", name)
     else:
         version = pick_version(cfg)
-        itypes = available_instance_types(cfg)
+        itypes, zones = available_instance_types(cfg)
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
-            fh.write(eksctl_config(cfg, version, itypes))
+            fh.write(eksctl_config(cfg, version, itypes, zones))
             path = fh.name
-        log.info("creating cluster %s (EKS %s, %s x spot %s) - takes ~15-20 min",
-                 name, version, cfg["NODE_COUNT"], ", ".join(itypes))
+        log.info("creating cluster %s (EKS %s, %s x spot %s in %s) - takes ~15-20 min",
+                 name, version, cfg["NODE_COUNT"], ", ".join(itypes), cfg.get("NODE_AZ") or zones[0])
         t0 = time.time()
         try:  # eksctl prints its own progress; each line goes into our log as it arrives
             run_streaming(["eksctl", "create", "cluster", "-f", path], log=log, prefix="eksctl: ", timeout=3600)

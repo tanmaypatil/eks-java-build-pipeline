@@ -1,0 +1,39 @@
+# Experiment plan for `jbp experiment` (see docs/experiments/README.md).
+#
+#   set KEY=VALUE                      setting for the whole experiment session (cluster and every run)
+#   experiment ID ORDER KEY="..." ...  ORDER: shuffle (variants run in random order each rep, so drift in
+#                                      the node or network doesn't line up with one variant) or fixed (the
+#                                      variants depend on each other, e.g. warm after empty).
+#                                      Keys: objective, expect, baseline (a variant name; default the first)
+#   variant ID NAME KEY=VALUE ...      one run: settings for it, plus REPOS=p1,p3,... (pN = perf-pN-*,
+#                                      other names as in config/repos.txt, or "all")
+#
+# Every variant is a separate pipeline run (own RUN_ID, own results) on the same cluster and PVC.
+# Settings not given here come from config/settings.env, so every run starts from the baseline spec.
+
+# One 8 vCPU node type only: a mix of CPU models would add noise between variants. 2xlarge so a 4-CPU
+# pod fits next to the orchestrator.
+set INSTANCE_TYPES=m6a.2xlarge
+set NODE_COUNT=1
+# ap-south-1 spot price for m6a.2xlarge seen 22 Nov 2026 ($0.108-0.118/h), for the cost line in the report
+set PRICE_NODE_HOUR=0.115
+
+experiment cpu-scaling shuffle baseline=cpu2 objective="Find the pod CPU size where build time stops dropping, and whether Maven module parallelism (-T1C) helps at each size." expect="Local benchmark: p4 101 s at 1 CPU, 50 s at 2, 29 s at 4 (about 2x per doubling). -T1C about 0% at 2 CPU, -45% on p6 at 4 CPU."
+variant cpu-scaling cpu1        BUILD_CPU=1 MAVEN_ARGS_EXTRA=     REPOS=p1,p3,p4,p5,p6
+variant cpu-scaling cpu1-t1c    BUILD_CPU=1 MAVEN_ARGS_EXTRA=-T1C REPOS=p1,p3,p4,p5,p6
+variant cpu-scaling cpu2        BUILD_CPU=2 MAVEN_ARGS_EXTRA=     REPOS=p1,p3,p4,p5,p6
+variant cpu-scaling cpu2-t1c    BUILD_CPU=2 MAVEN_ARGS_EXTRA=-T1C REPOS=p1,p3,p4,p5,p6
+variant cpu-scaling cpu4        BUILD_CPU=4 MAVEN_ARGS_EXTRA=     REPOS=p1,p3,p4,p5,p6
+variant cpu-scaling cpu4-t1c    BUILD_CPU=4 MAVEN_ARGS_EXTRA=-T1C REPOS=p1,p3,p4,p5,p6
+
+experiment build-cache fixed baseline=off objective="Measure how much the Maven build cache saves when the same repo is rebuilt unchanged or with a small change, and check what it skips (a cache hit skips tests)." expect="Local benchmark on p6: 108 s to 2.8 s unchanged (-97%), 10 s with a leaf module edited (-90%), no gain after a root module edit."
+variant build-cache off         BUILD_CACHE=off                       REPOS=p3,p5,p6
+variant build-cache empty       BUILD_CACHE=on CLEAR_CACHE=build      REPOS=p3,p5,p6
+variant build-cache warm        BUILD_CACHE=on                        REPOS=p3,p5,p6
+variant build-cache warm-leaf   BUILD_CACHE=on BUILD_CACHE_EDIT=leaf  REPOS=p3,p5,p6
+variant build-cache warm-root   BUILD_CACHE=on BUILD_CACHE_EDIT=root  REPOS=p3,p5,p6
+
+experiment dep-cache fixed baseline=warm objective="Measure what downloading dependencies and the Maven/Gradle distribution costs per build, versus a warm cache shared on the volume." expect="Not measured locally. Expect cold builds tens of seconds slower on small repos, a smaller share on big ones, and a risk of HTTP 429 from Maven Central."
+variant dep-cache none          DEP_CACHE=none                        REPOS=all
+variant dep-cache empty         DEP_CACHE=shared CLEAR_CACHE=deps     REPOS=all
+variant dep-cache warm          DEP_CACHE=shared                      REPOS=all

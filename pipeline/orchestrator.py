@@ -33,6 +33,35 @@ from jbpcore import (CommandError, JbpError, Settings, StageTracker, fmt_duratio
                      now_ms, read_json, repo_logger, run, setup_logging, utc_iso, write_json_atomic)
 
 HERE = Path(__file__).resolve().parent
+
+# Settings passed to build.sh as env vars: template placeholder -> settings key. Their values are free
+# text, so render() escapes them for YAML.
+FREE_TEXT_ENV = {"MAVEN_ARGS": "MAVEN_ARGS_EXTRA", "GRADLE_ARGS": "GRADLE_ARGS_EXTRA", "MAVEN_OPTS": "MAVEN_OPTS_EXTRA",
+                 "BUILD_CACHE": "BUILD_CACHE", "BUILD_CACHE_EDIT": "BUILD_CACHE_EDIT"}
+# ...and the env var name build.sh reads for each placeholder.
+BUILD_ENV_NAME = {"MAVEN_ARGS": "MAVEN_ARGS_EXTRA", "GRADLE_ARGS": "GRADLE_ARGS_EXTRA", "MAVEN_OPTS": "MAVEN_OPTS",
+                  "BUILD_CACHE": "BUILD_CACHE", "BUILD_CACHE_EDIT": "BUILD_CACHE_EDIT"}
+# CLEAR_CACHE item -> folders under /workspace/cache that it empties.
+CACHE_DIRS = {"deps": ("m2", "m2-home", "gradle"), "build": ("build-cache",)}
+
+
+def yaml_dq(value: str) -> str:
+    """Escape text for use inside a double-quoted YAML scalar."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def clear_caches(ws: Path, which: str) -> list[str]:
+    """Empty the caches named in CLEAR_CACHE (e.g. "deps,build"), so an experiment starts cold."""
+    cleared = []
+    for item in (w.strip() for w in which.split(",") if w.strip()):
+        if item not in CACHE_DIRS:
+            raise JbpError(f"CLEAR_CACHE: unknown cache {item!r} (use {', '.join(CACHE_DIRS)})")
+        for d in CACHE_DIRS[item]:
+            shutil.rmtree(ws / "cache" / d, ignore_errors=True)
+            cleared.append(d)
+    return cleared
+
+
 log = logging.getLogger("orchestrator")
 
 
@@ -129,9 +158,12 @@ class K8sLauncher:
             "TOOL": plan.tool, "WRAPPER": "yes" if plan.wrapper else "no", "JAVA": str(plan.jdk),
             "WORKDIR": str(plan.workdir), "RUN_ID": self.run_id, "CPU": self.cfg["BUILD_CPU"],
             "MEM": self.cfg["BUILD_MEM"], "TIMEOUT": self.cfg["BUILD_TIMEOUT_S"], "DEP_CACHE": self.cfg["DEP_CACHE"],
-            "PVC": self.cfg.get("PVC_NAME", "jbp-workspace"), "MAVEN_ARGS": self.cfg["MAVEN_ARGS_EXTRA"],
-            "GRADLE_ARGS": self.cfg["GRADLE_ARGS_EXTRA"],
+            "PVC": self.cfg.get("PVC_NAME", "jbp-workspace"),
         }
+        # Free text from settings lands inside a double-quoted YAML string, so a quote or backslash in it
+        # (e.g. MAVEN_ARGS_EXTRA=-DargLine="-Xmx1g") must be escaped or the manifest breaks.
+        for key, setting in FREE_TEXT_ENV.items():
+            values[key] = yaml_dq(self.cfg.get(setting, ""))
         out = self.template
         for k, v in values.items():
             out = out.replace(f"__{k}__", v)
@@ -262,8 +294,10 @@ class DockerLauncher:
                "-v", f"{self.ws}:/workspace", "-v", f"{HERE}:/app:ro",
                "-e", f"REPO_NAME={spec.name}", "-e", f"TOOL={plan.tool}", "-e", f"WRAPPER={'yes' if plan.wrapper else 'no'}",
                "-e", f"JAVA={plan.jdk}", "-e", f"WORKDIR=/workspace/{rel}", "-e", "RESULT_DIR=/workspace/results",
-               "-e", f"DEP_CACHE={self.cfg['DEP_CACHE']}", "-e", f"MAVEN_ARGS_EXTRA={self.cfg['MAVEN_ARGS_EXTRA']}",
-               "-e", f"GRADLE_ARGS_EXTRA={self.cfg['GRADLE_ARGS_EXTRA']}", plan.image, "bash", "/app/build.sh"]
+               "-e", f"DEP_CACHE={self.cfg['DEP_CACHE']}",
+               *[a for key, setting in FREE_TEXT_ENV.items()
+                 for a in ("-e", f"{BUILD_ENV_NAME[key]}={self.cfg.get(setting, '')}")],
+               plan.image, "bash", "/app/build.sh"]
         rlog.info("container started (image %s, %s CPU / %s)", plan.image, cpus, mem)
         tracker.repo(spec.name, "WAIT")
         rlog.extra["stage"] = "WAIT"
@@ -485,7 +519,8 @@ class Orchestrator:
                 self.result_path(spec.name).unlink(missing_ok=True)
             base = {"repo": spec.name, "url": spec.url, "ref": spec.ref, "subdir": spec.subdir, "run_id": self.run_id,
                     "launcher": self.cfg.get("LAUNCHER", "k8s"), "pod_cpu": self.cfg["BUILD_CPU"],
-                    "pod_mem": self.cfg["BUILD_MEM"], "dep_cache": self.cfg["DEP_CACHE"], "started": utc_iso()}
+                    "pod_mem": self.cfg["BUILD_MEM"], "dep_cache": self.cfg["DEP_CACHE"],
+                    "maven_args": self.cfg.get("MAVEN_ARGS_EXTRA", ""), "started": utc_iso()}
             # CLONE
             rlog.info("[%d/%d] cloning %s%s", i, total, spec.url, f" @ {spec.ref}" if spec.ref else "")
             self.tracker.repo(spec.name, "CLONE")
@@ -552,6 +587,9 @@ def main() -> int:
     else:
         prev = previous_run_id(ws / "results")
         log.info("%s run %s", "resuming" if prev == cfg["RUN_ID"] else "starting", cfg["RUN_ID"])
+    # Only when the run starts, never when it resumes: a restart must not throw away what it built.
+    if cfg.get("CLEAR_CACHE") and previous_run_id(ws / "results") != cfg["RUN_ID"]:
+        log.info("CLEAR_CACHE=%s: emptied %s", cfg["CLEAR_CACHE"], ", ".join(clear_caches(ws, cfg["CLEAR_CACHE"])))
 
     # Kubernetes sends SIGTERM when it evicts the pod (spot reclaim, node drain). Exit cleanly with 143;
     # the Job's podFailurePolicy (DisruptionTarget -> Ignore) then starts a new pod, which resumes.

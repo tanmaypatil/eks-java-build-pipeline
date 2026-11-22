@@ -15,6 +15,28 @@ Update both together.
 | [prerequisites.csv](prerequisites.csv) | fixes to land before any EKS number is trusted |
 | [test-projects.csv](test-projects.csv) | the p1 to p6 synthetic repos and the two real repos |
 
+## Running experiments
+
+`config/experiments.txt` holds experiments 1, 3 and 5 in a form the pipeline runs (format at the top of
+the file). Each variant is an ordinary pipeline run with a few settings changed; all variants share one
+cluster and one volume.
+
+```bash
+./jbp experiment --local --reps 1          # free rehearsal with Docker (no cluster)
+./jbp experiment --reps 3                  # EKS: up -> warm-up -> 3 rounds of every variant -> down
+./jbp experiment --reps 3 --only build-cache
+```
+
+Output: `runs/<session>/comparison.html` (per experiment: objective, expectation, a repo × variant table of
+median build time and the change against the baseline variant, a verdict, and a detail table),
+`comparison.csv`, and one ordinary run folder per variant and rep.
+
+Switches the plan uses (also usable on a normal run): `MAVEN_OPTS_EXTRA` (JVM flags for Maven itself),
+`BUILD_CACHE=on` (adds the Maven build-cache extension at build time, cache on the volume),
+`BUILD_CACHE_EDIT=leaf|root` (edits one source file before building), `CLEAR_CACHE=deps,build` (empties
+those caches when the run starts). With `DEP_CACHE=shared` the Maven wrapper's download now also lives on
+the volume (`MAVEN_USER_HOME`).
+
 ## Experiments (ranked)
 
 | Rank | Experiment | Repos | Pod (CPU / memory) | Status | Effort |

@@ -2,6 +2,7 @@
 # Runs inside the build container (maven:*-temurin-* / gradle:* / eclipse-temurin:*).
 # Required env: REPO_NAME TOOL WRAPPER JAVA WORKDIR RESULT_DIR
 # Optional env: MAVEN_ARGS_EXTRA GRADLE_ARGS_EXTRA MAVEN_GOALS GRADLE_TASKS DEP_CACHE (shared|none)
+#               MAVEN_OPTS (JVM flags for Maven itself) BUILD_CACHE (off|on) BUILD_CACHE_EDIT (leaf|root)
 # No "set -e" on purpose: a failing build must still reach the measurement and JSON-writing code below.
 set -uo pipefail
 : "${REPO_NAME:?}" "${TOOL:?}" "${WORKDIR:?}" "${RESULT_DIR:?}"
@@ -51,8 +52,55 @@ now_ms() { date +%s%3N; }
 if [ "$TOOL" = maven ]; then
   MVN=mvn; [ "${WRAPPER:-no}" = yes ] && chmod +x mvnw && MVN=./mvnw
   CACHE_ARGS=""
-  # shared: point the local repository at the PVC so later repos reuse jars earlier ones downloaded.
-  [ "${DEP_CACHE:-shared}" = shared ] && CACHE_ARGS="-Dmaven.repo.local=$CACHE_ROOT/m2"
+  # shared: point the local repository at the PVC so later repos reuse jars earlier ones downloaded,
+  # and MAVEN_USER_HOME too, so ./mvnw finds the Maven distribution it downloaded last time instead of
+  # fetching it again into the throwaway container.
+  if [ "${DEP_CACHE:-shared}" = shared ]; then
+    CACHE_ARGS="-Dmaven.repo.local=$CACHE_ROOT/m2"
+    export MAVEN_USER_HOME="$CACHE_ROOT/m2-home"
+  fi
+  # DECISION: incremental build cache (experiment). BUILD_CACHE=on adds the Maven build-cache extension
+  # at build time, so the repos themselves stay plain; the cache lives on the PVC so the next build pod
+  # can reuse it. A repo that already has .mvn/extensions.xml is left alone (we don't merge XML).
+  if [ "${BUILD_CACHE:-off}" = on ]; then
+    if [ ! -f .mvn/extensions.xml ]; then
+      mkdir -p .mvn
+      cat > .mvn/extensions.xml <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<extensions>
+  <extension>
+    <groupId>org.apache.maven.extensions</groupId>
+    <artifactId>maven-build-cache-extension</artifactId>
+    <version>1.2.0</version>
+  </extension>
+</extensions>
+XML
+      cat > .mvn/maven-build-cache-config.xml <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<cache xmlns="http://maven.apache.org/BUILD-CACHE-CONFIG/1.2.0">
+  <configuration>
+    <enabled>true</enabled>
+    <hashAlgorithm>XX</hashAlgorithm>
+    <local><maxBuildsCached>3</maxBuildsCached></local>
+  </configuration>
+  <input><global><glob>{*.java,*.xml,*.properties}</glob></global></input>
+</cache>
+XML
+    else
+      echo "[jbp] BUILD_CACHE=on but the repo has its own .mvn/extensions.xml: not adding the cache extension"
+    fi
+    CACHE_ARGS="$CACHE_ARGS -Dmaven.build.cache.location=$CACHE_ROOT/build-cache"
+  fi
+  # BUILD_CACHE_EDIT simulates a developer change before a cached rebuild: one line appended to a
+  # source file in the last module (leaf: nothing depends on it) or the first module (root: everything
+  # depends on it). Modules are the mod-* folders of the synthetic perf repos.
+  if [ -n "${BUILD_CACHE_EDIT:-}" ]; then
+    mods=$(ls -d mod-*/ 2>/dev/null | sort)
+    m=$( [ "$BUILD_CACHE_EDIT" = root ] && echo "$mods" | head -1 || echo "$mods" | tail -1 )
+    f=$( [ -n "$m" ] && find "$m" -path '*/src/main/java/*' -name '*.java' | sort | head -1 )
+    if [ -n "$f" ]; then echo "// jbp edit-marker $(date +%s%N)" >> "$f"; echo "[jbp] edited $f ($BUILD_CACHE_EDIT)"
+    else echo "[jbp] BUILD_CACHE_EDIT=$BUILD_CACHE_EDIT: no mod-* module found, nothing edited"; fi
+  fi
   CMD="$MVN -B -ntp -e $CACHE_ARGS ${MAVEN_ARGS_EXTRA:-} ${MAVEN_GOALS:-verify}"
 elif [ "$TOOL" = gradle ]; then
   GR=gradle; [ "${WRAPPER:-no}" = yes ] && chmod +x gradlew && GR=./gradlew
@@ -64,15 +112,23 @@ fi
 
 echo "[jbp] repo=$REPO_NAME tool=$TOOL java=$JAVA wrapper=${WRAPPER:-no}" | tee "$LOG"
 echo "[jbp] cmd: $CMD" | tee -a "$LOG"
+echo "[jbp] MAVEN_OPTS=${MAVEN_OPTS:-} BUILD_CACHE=${BUILD_CACHE:-off} BUILD_CACHE_EDIT=${BUILD_CACHE_EDIT:-}" | tee -a "$LOG"
 java -version 2>&1 | tee -a "$LOG"
 
 # Snapshot the counters immediately before and after the build: the deltas measure the build alone,
 # not this script or the container start-up.
+# How much the build downloaded: growth of the dependency + wrapper caches it uses (-ntp hides the
+# transfer log lines, so we measure the folders instead). Taken outside the timed section.
+if [ "${DEP_CACHE:-shared}" = shared ]; then DL_DIRS="$CACHE_ROOT/m2 $CACHE_ROOT/m2-home $CACHE_ROOT/gradle"
+else DL_DIRS="$HOME/.m2 $HOME/.gradle"; fi
+dl_kb() { du -sk $DL_DIRS 2>/dev/null | awk '{s+=$1} END{print s+0}'; }
+dl0=$(dl_kb)
 cpu0=$(cg_cpu_usec); read -r p0 t0 u0 < <(cg_throttled)
 t_start=$(now_ms)
 bash -c "$CMD" >>"$LOG" 2>&1
 rc=$?
 t_end=$(now_ms)
+dl1=$(dl_kb)
 cpu1=$(cg_cpu_usec); read -r p1 t1 u1 < <(cg_throttled)
 
 # ---- test results (surefire/failsafe/gradle all write JUnit XML) ----
@@ -106,6 +162,8 @@ cat > "$OUT" <<EOF
  "throttled_pct":$thr_pct,"throttled_s":$thr_s,
  "peak_mem_mib":$(( $(cg_mem_peak) / 1048576 )),"oom_kills":$(cg_oom),
  "tests":$tests,"failures":$failures,"errors":$errors,"skipped":$skipped,
+ "cache_hits":$(grep -c 'Found cached build' "$LOG" || true),"downloaded_kb":$((dl1 - dl0)),
+ "maven_opts":"$(echo "${MAVEN_OPTS:-}" | tr '"\\' "'/")","build_cache":"${BUILD_CACHE:-off}","build_cache_edit":"${BUILD_CACHE_EDIT:-}",
  "error_excerpt":"$last_err"}
 EOF
 echo "[jbp] rc=$rc build_s=$((dur_ms/1000)) tests=$tests failures=$failures errors=$errors" | tee -a "$LOG"
