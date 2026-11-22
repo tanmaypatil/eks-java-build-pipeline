@@ -399,6 +399,14 @@ def cmd_experiment(cfg, r, args):
                                                                   for v in e.variants]} for e in plan.experiments],
             "runs": []}
     meta_path = r.dir / "experiment.json"
+    # Same --run-id again (e.g. the plan run in chunks): keep the runs already recorded, so one
+    # comparison page covers every chunk.
+    if meta_path.exists():
+        old = json.loads(meta_path.read_text())
+        meta["runs"] = old.get("runs", [])
+        meta["started"] = old.get("started", meta["started"])
+        ids = {e["id"] for e in meta["experiments"]}
+        meta["experiments"] = [e for e in old.get("experiments", []) if e["id"] not in ids] + meta["experiments"]
 
     def save():
         meta_path.write_text(json.dumps(meta, indent=1))
