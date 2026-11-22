@@ -1,11 +1,24 @@
-# Ephemeral EKS Java build pipeline
+# Java build tuning on Kubernetes
 
-Spin up a throwaway Kubernetes cluster on AWS, build a list of Java repos inside it, get an HTML
-report, tear the cluster down. Built to make each run as cheap as possible first, so build
-optimisations (`-T1C`, JVM flags, caches, pod sizes) can be compared later on the same rig.
+**What drives Java build time, and which settings make builds faster in the cloud?** This repo answers
+that with experiments. It is a pipeline that builds a list of Java repos (Maven and Gradle) inside
+Kubernetes pods, measures every build (time, CPU used, CPU throttling, memory, tests), and runs the same
+builds again with one parameter changed: pod CPU and memory, Maven module parallelism, JVM flags, test
+settings, dependency and build caches. The target platform is OpenShift, so build pods are sized like
+OpenShift build pods (CPU request = limit).
 
-**The experiment plan** (what we test, with exact pod sizes, repos and flags) is in
-[docs/experiments/](docs/experiments/README.md).
+The Kubernetes cluster is only the test bed. Three are interchangeable:
+
+| Test bed | Command | Cost | Use it for |
+|---|---|---|---|
+| Docker on your machine | `./jbp local-docker` | free | quick checks, rehearsing an experiment |
+| kind (Kubernetes in Docker) | `./jbp local-kind up/run/down` | free | the real Kubernetes path, small repos |
+| Ephemeral EKS on AWS | `./jbp all`, `./jbp experiment` | cents per run | numbers you trust: a real cloud node, created per session and always torn down |
+
+**The experiment plan** (what we test, exact pod sizes, repos and flags, objectives) is in
+[docs/experiments/](docs/experiments/README.md). `./jbp experiment` runs it and writes a comparison page.
+
+## How one run works (EKS)
 
 ```
 ./jbp all
@@ -68,6 +81,7 @@ credentials, `eksctl` ≥ 0.200, `kubectl`. No Python packages needed (standard 
 ./jbp all --keep          # leave the cluster up for several runs; then ./jbp down
 ./jbp status              # where is the latest run right now
 ./jbp leftovers           # anything still billing? (--delete removes orphaned volumes)
+./jbp experiment --reps 3 # run the experiment plan (config/experiments.txt) -> comparison.html
 
 # any setting can be overridden per run
 BUILD_CPU=4 BUILD_MEM=8Gi MAVEN_ARGS_EXTRA=-T1C ./jbp run --repos config/my-repos.txt
@@ -104,7 +118,7 @@ plus Spring PetClinic (Maven wrapper) and a Gradle-wrapper guide in a subfolder.
 
 The build then runs on the **smallest supported JDK ≥ the version needed** (11/17/21/25; edit
 `config/images.env`). `1.8` maps to JDK 11, which still compiles `--release 8`.
-Tests: `python3 -m unittest discover -s tests` (39 tests: detection, repo-list parsing, pod-failure
+Tests: `python3 -m unittest discover -s tests` (55 tests: detection, repo-list parsing, pod-failure
 classification, stage tracking, manifest rendering).
 
 ## Settings (`config/settings.env`, plain `KEY=value`, each overridable by an env var of the same name)
@@ -118,6 +132,9 @@ classification, stage tracking, manifest rendering).
 | `MAX_PARALLEL` | 1 | builds strictly one by one. 2-3 on a 2xlarge node shortens wall time |
 | `DEP_CACHE` | shared | `~/.m2` and `GRADLE_USER_HOME` on the PVC, reused across repos. `none` = cold builds |
 | `MAVEN_ARGS_EXTRA` | | e.g. `-T1C`, `-DskipTests` for optimisation runs |
+| `MAVEN_OPTS_EXTRA` | | JVM flags for Maven itself (`MAVEN_OPTS` in the build pod), e.g. `-XX:TieredStopAtLevel=1` |
+| `BUILD_CACHE` / `BUILD_CACHE_EDIT` / `CLEAR_CACHE` | off / / | experiment switches, see [docs/experiments](docs/experiments/README.md) |
+| `NODE_AZ` | first zone offering every type | the node group stays in one zone, so a spot replacement can attach the EBS volume |
 | `IMAGE_REGISTRY` | `public.ecr.aws/docker/library/` | AWS mirror of Docker official images: no Docker Hub rate limit |
 
 Spot reclaims are handled: Jobs use a `podFailurePolicy` that retries pods hit by a
@@ -155,7 +172,7 @@ plane price), a NAT gateway (avoided here), EBS volumes left after a failed tear
 
 ## Next optimisations (phase 2)
 
-- Feed in the earlier benchmark's wins: `MAVEN_ARGS_EXTRA=-T1C`, `MAVEN_OPTS=-XX:TieredStopAtLevel=1`, JUnit parallel.
+- Feed in the earlier benchmark's wins: `MAVEN_ARGS_EXTRA=-T1C`, `MAVEN_OPTS_EXTRA=-XX:TieredStopAtLevel=1`, JUnit parallel.
 - Size pods from the report: avg cores ≪ limit means the limit can shrink, throttling ≫ 0 means it's too small.
 - Pre-pull build images (DaemonSet) or bake an AMI so wait+pull drops to ~0.
 - Maven Central rate-limits (HTTP 429) bursts from one IP; we hit it in testing. Put a mirror in front

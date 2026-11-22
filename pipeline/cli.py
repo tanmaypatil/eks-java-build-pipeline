@@ -1,4 +1,4 @@
-"""jbp: drive the ephemeral EKS Java build pipeline.
+"""jbp: build Java repos on Kubernetes, measure them, and run build-time experiments.
 
   jbp all [--keep] [--repos FILE]   cluster up -> run -> report -> cluster down (down always runs)
   jbp up                            create the EKS cluster (~15-20 min)
@@ -9,6 +9,9 @@
   jbp local-docker [--repos FILE]   no cluster: same orchestrator + build.sh with Docker
   jbp local-kind up|run|down        free Kubernetes rehearsal with kind
   jbp report RUN_DIR                (re)build report.html for a run
+  jbp experiment [--reps N] [--only IDS] [--local] [--keep]
+                                    cluster up once -> warm-up -> N rounds of every variant in
+                                    config/experiments.txt -> comparison.html -> cluster down
 
 Settings come from config/settings.env; any environment variable with the same name overrides it.
 Every command logs to the console and to runs/<RUN_ID>/driver.log.
@@ -19,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -27,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cluster  # noqa: E402
+import experiment  # noqa: E402
 from jbpcore import (ROOT, CommandError, JbpError, Settings, StageTracker, fmt_duration, read_json,  # noqa: E402
                      require_tools, run, run_streaming, setup_logging)
 
@@ -38,9 +43,9 @@ RUNS = ROOT / "runs"
 class Run:
     """One run's folder: runs/<id>/ with driver.log, driver_status.json, events, phases.env, results/."""
 
-    def __init__(self, run_id: str | None = None):
+    def __init__(self, run_id: str | None = None, parent: Path | None = None):
         self.id = run_id or os.environ.get("RUN_ID") or time.strftime("%Y%m%d-%H%M%S")
-        self.dir = RUNS / self.id
+        self.dir = (parent or RUNS) / self.id
         self.dir.mkdir(parents=True, exist_ok=True)
         self.tracker: StageTracker | None = None
 
@@ -326,28 +331,34 @@ def cmd_leftovers(cfg, r, args):
     raise JbpError("leftovers found")
 
 
-def cmd_local_docker(cfg, r, args):
-    require_tools("docker", "git")
-    ws = Path(os.environ.get("WORKSPACE", r.dir / "workspace"))
+def run_local_docker(cfg: Settings, r: Run, repos: Path, ws: Path) -> bool:
+    """Run the orchestrator on this machine with Docker; `ws` stands in for the PVC. Results are copied
+    into the run folder, because the next run on the same workspace moves results/ aside."""
     ws.mkdir(parents=True, exist_ok=True)
     cfg["IMAGE_REGISTRY"] = os.environ.get("LOCAL_IMAGE_REGISTRY", "")   # Docker Hub locally
     (r.dir / "settings.effective.env").write_text(effective_settings_text(cfg))
     cfg["_context"] = "local-docker"
     r.phase("ORCHESTRATE")
-    env = {"LAUNCHER": "docker", "WORKSPACE": str(ws), "RUN_ID": r.id, "REPOS_FILE": str(Path(args.repos).resolve()),
+    env = {"LAUNCHER": "docker", "WORKSPACE": str(ws), "RUN_ID": r.id, "REPOS_FILE": str(repos.resolve()),
            "IMAGES_FILE": str(ROOT / "config" / "images.env"), "SETTINGS_FILE": str(r.dir / "settings.effective.env")}
+    ok = True
     try:
         run_streaming([sys.executable, str(PIPE / "orchestrator.py")], log=log, env=env, raw=True, prefix="  | ")
-        r.phase("ORCHESTRATE", "ok")
     except CommandError:
-        r.phase("ORCHESTRATE", "failed")
-        raise JbpError("orchestrator exited with an error (see above)")
-    finally:
-        res = r.dir / "results"
-        if not res.exists():
-            res.symlink_to(ws / "results")
+        ok = False
+    r.phase("ORCHESTRATE", "ok" if ok else "failed")
+    if (ws / "results").exists():
+        shutil.copytree(ws / "results", r.dir / "results", dirs_exist_ok=True)
+    return ok
+
+
+def cmd_local_docker(cfg, r, args):
+    require_tools("docker", "git")
+    ok = run_local_docker(cfg, r, Path(args.repos), Path(os.environ.get("WORKSPACE", r.dir / "workspace")))
     r.phase("REPORT")
     r.phase("REPORT", "ok" if make_report(r, cfg) else "failed")
+    if not ok:
+        raise JbpError("orchestrator exited with an error (see above)")
 
 
 def cmd_local_kind(cfg, r, args):
@@ -363,6 +374,106 @@ def cmd_local_kind(cfg, r, args):
         cfg["BUILD_CPU"] = os.environ.get("BUILD_CPU", "1")
         cfg["BUILD_MEM"] = os.environ.get("BUILD_MEM", "3Gi")
         cmd_run(cfg, r, args)
+
+
+def cmd_experiment(cfg, r, args):
+    """Run an experiment plan: cluster up once, warm-up pass, REPS rounds of every variant, comparison.html.
+
+    Each variant is an ordinary run in runs/<session>/<RUN_ID>/ on the same cluster and volume, so caches
+    carry over between variants exactly as the plan's order says. Down always runs (unless --keep/--local).
+    """
+    from jbpcore import read_env_file
+    plan_file = Path(args.plan)
+    repos_txt = Path(args.repos)
+    known = [ln.split()[0] for ln in repos_txt.read_text().splitlines() if ln.split() and not ln.lstrip().startswith("#")]
+    plan = experiment.select(experiment.parse_plan(plan_file.read_text(), known), args.only)
+    cfg.update(plan.settings)
+    order = experiment.schedule(plan, args.reps, seed=args.seed)
+    session = r.id
+    log.info("experiment session %s: %d experiments, %d reps, %d runs + warm-up (%s)", session, len(plan.experiments),
+             args.reps, len(order), "local Docker" if args.local else f"EKS {cfg['AWS_REGION']} {cfg['INSTANCE_TYPES']}")
+    meta = {"session": session, "plan_file": str(plan_file), "reps": args.reps, "local": args.local,
+            "settings": dict(cfg), "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "experiments": [{"id": e.id, "order": e.order, "objective": e.objective, "expect": e.expect,
+                             "baseline": e.baseline, "variants": [{"name": v.name, "settings": v.settings, "repos": v.repos}
+                                                                  for v in e.variants]} for e in plan.experiments],
+            "runs": []}
+    meta_path = r.dir / "experiment.json"
+
+    def save():
+        meta_path.write_text(json.dumps(meta, indent=1))
+    save()
+    ws = r.dir / "workspace"   # --local only: the stand-in for the PVC, shared by every variant
+
+    def one_run(rid, settings, repos, label):
+        child = Run(rid, parent=r.dir)
+        vcfg = Settings(cfg)
+        vcfg.update(settings)
+        rf = experiment.filtered_repo_file(repos_txt, repos, child.dir / "repos.txt")
+        log.info("----- %s: %s on %s", label, " ".join(f"{k}={v}" for k, v in settings.items()) or "baseline settings",
+                 ", ".join(repos))
+        t0 = time.time()
+        try:
+            if args.local:
+                ok = run_local_docker(vcfg, child, rf, ws)
+            else:
+                vcfg["_context"] = cfg.get("_context", "")
+                ok = run_on_cluster(vcfg, child, rf)
+            make_report(child, vcfg)
+        except JbpError as e:
+            log.error("%s failed: %s (carrying on with the next run)", label, e)
+            ok = False
+        return ok, round(time.time() - t0)
+
+    interrupted = {"sig": None}
+
+    def on_signal(signum, _f):
+        interrupted["sig"] = signum
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_signal)
+    try:
+        if args.local:
+            require_tools("docker", "git")
+        else:
+            require_tools("aws", "eksctl", "kubectl")
+            cfg["STORAGE_CLASS"] = cfg["STORAGE_CLASS"] or "jbp-gp3"
+            (r.dir / "cluster.env").write_text(f"INSTANCE_TYPES={cfg['INSTANCE_TYPES']}\nNODE_COUNT={cfg['NODE_COUNT']}\n"
+                                               f"AWS_REGION={cfg['AWS_REGION']}\n")
+            cmd_up(cfg, r, args)
+            cfg["_context"] = run(["kubectl", "config", "current-context"], log=log, check=False).stdout.strip()
+        # Warm-up: pulls every image and fills the dependency cache, so the first measured variant isn't
+        # charged for it. Not part of the results.
+        if not args.no_warmup:
+            union = [n for n in known if any(n in v.repos for e in plan.experiments for v in e.variants)]
+            r.phase("WARMUP")
+            ok, secs = one_run(f"{session}-warmup"[:63], {}, union, "warm-up (not measured)")
+            r.phase("WARMUP", "ok" if ok else "failed")
+        for i, (rep, v) in enumerate(order, 1):
+            rid = experiment.run_id(session, rep, v)
+            ok, secs = one_run(rid, v.settings, v.repos, f"[{i}/{len(order)}] rep {rep} {v.experiment}/{v.name}")
+            meta["runs"].append({"rep": rep, "experiment": v.experiment, "variant": v.name, "run_id": rid,
+                                 "ok": ok, "wall_s": secs})
+            save()
+    except KeyboardInterrupt:
+        log.warning("interrupted: %s", "tearing down now" if not (args.local or args.keep) else "stopping")
+        raise
+    finally:
+        if not args.local:
+            if args.keep:
+                log.warning("--keep: cluster %s left running. Run `jbp down` when finished.", cfg["CLUSTER_NAME"])
+            else:
+                try:
+                    cmd_down(cfg, r, args)
+                except Exception as e:  # noqa: BLE001
+                    log.error("TEARDOWN PROBLEM: %s -> run `jbp leftovers`", e)
+        meta["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        meta["phases"] = read_env_file(r.dir / "phases.env") if (r.dir / "phases.env").exists() else {}
+        save()
+        cp = run([sys.executable, str(ROOT / "report" / "compare.py"), str(r.dir)], log=log, check=False, timeout=120)
+        if cp.returncode == 0:
+            log.info("comparison: %s", r.dir / "comparison.html")
+        else:
+            log.error("comparison report failed: %s", (cp.stderr or cp.stdout).strip()[-500:])
 
 
 def cmd_report(cfg, r, args):
@@ -393,6 +504,15 @@ def main(argv=None) -> int:
     sp.add_argument("--repos", default=default_repos)
     sp = sub.add_parser("report")
     sp.add_argument("run_dir")
+    sp = sub.add_parser("experiment", help="run the experiment plan (config/experiments.txt)")
+    sp.add_argument("--plan", default=str(ROOT / "config" / "experiments.txt"))
+    sp.add_argument("--repos", default=default_repos)
+    sp.add_argument("--reps", type=int, default=3, help="rounds of every variant (default 3)")
+    sp.add_argument("--only", default="", help="comma list of experiment IDs to run (default all)")
+    sp.add_argument("--seed", type=int, default=None, help="shuffle seed, to repeat a run order")
+    sp.add_argument("--local", action="store_true", help="local Docker instead of EKS (free rehearsal)")
+    sp.add_argument("--keep", action="store_true", help="leave the cluster running afterwards")
+    sp.add_argument("--no-warmup", action="store_true", help="skip the unmeasured warm-up pass")
     args = p.parse_args(argv)
 
     cfg = Settings.load()
@@ -407,7 +527,7 @@ def main(argv=None) -> int:
         log.info("jbp %s (run %s, log %s)", args.cmd, r.id, r.dir / "driver.log")
     handler = {"all": cmd_all, "up": cmd_up, "down": cmd_down, "run": cmd_run, "status": cmd_status,
                "leftovers": cmd_leftovers, "local-docker": cmd_local_docker, "local-kind": cmd_local_kind,
-               "report": cmd_report}[args.cmd]
+               "report": cmd_report, "experiment": cmd_experiment}[args.cmd]
     t0 = time.time()
     # Exit codes: 0 ok, 1 expected failure (JbpError: message only, no traceback), 130 interrupted.
     # Any other exception is a bug and is allowed to show its traceback.
