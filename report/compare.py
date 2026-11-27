@@ -210,13 +210,16 @@ for exp in meta["experiments"]:
 
 # ---- session facts and cost
 st = meta.get("settings", {})
-ph = meta.get("phases", {})
-try:
-    t0 = float(ph.get("up_start") or ph.get("warmup_start"))
-    t1 = float(ph.get("down_end") or ph.get("warmup_end") or t0)
-    hours = max(0.0, (t1 - t0) / 3600)
-except (TypeError, ValueError):
-    hours = None
+# phases.env is appended to by every chunk of a session (same --run-id), so take the first start and the
+# last end rather than one value per key.
+starts, ends = [], []
+pf = os.path.join(session_dir, "phases.env")
+if os.path.exists(pf):
+    for line in open(pf):
+        k, _, v = line.strip().partition("=")
+        if v.isdigit():
+            (starts if k.endswith("_start") else ends if k.endswith("_end") else []).append(int(v))
+hours = (max(ends) - min(starts)) / 3600 if starts and ends and max(ends) > min(starts) else None
 cost = ""
 if hours is not None and not meta.get("local"):
     p_eks, p_node = float(st.get("PRICE_EKS_HOUR", 0.10)), float(st.get("PRICE_NODE_HOUR", 0.07))

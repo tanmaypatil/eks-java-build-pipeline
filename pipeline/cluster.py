@@ -134,6 +134,13 @@ def up(cfg: Settings, tracker: StageTracker | None = None) -> None:
     # failing; creating one takes 15-20 minutes.
     if cluster_exists(cfg):
         log.info("cluster %s already exists, reusing it", name)
+        # A cluster whose `eksctl create` was cut off (driver killed) has a control plane but no node group
+        # or add-ons; reusing it would leave every pod Pending. Make the operator start clean instead.
+        ngs = aws(cfg, "eks", "list-nodegroups", "--cluster-name", name, "--query", "nodegroups",
+                  "--output", "json", timeout=60).stdout
+        if not json.loads(ngs or "[]"):
+            raise JbpError(f"cluster {name} exists but has no node group (its creation was interrupted); "
+                           "run `jbp down`, then try again")
     else:
         version = pick_version(cfg)
         itypes, zones = available_instance_types(cfg)
