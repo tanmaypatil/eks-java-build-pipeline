@@ -12,14 +12,14 @@ that measure what makes them faster.
 | # | Question | Answer so far | Status |
 |---|---|---|---|
 | 1 | **The pod has more CPU: can the build use it?** | Up to 2 CPU, yes: 1 → 2 CPU halves build time. Beyond that only with Maven module parallelism: 4 CPU alone −13 to −22%, 4 CPU with `-T1C` −26 to −30%. `-T1C` makes a 2-CPU pod 5 to 11% *slower*. `-T1C` does nothing for single-module repos. | Measured on EKS |
-| 2 | **Can we avoid downloading third-party packages every time?** | Yes, with a dependency cache on a persistent volume (or an in-cluster Nexus/Artifactory mirror). Cold downloads cost +2 to 40% on the synthetic repos, +34 to 42% on Spring PetClinic, +165 to 292% on a Gradle project. After an upgrade only the new artifact downloads. | Measured on EKS |
+| 2 | **Can we avoid downloading third-party packages every time?** | Yes: keep them on a **PVC** mounted into every build pod (`-Dmaven.repo.local=/cache/m2`, `MAVEN_USER_HOME` and `GRADLE_USER_HOME` on it). Cold downloads cost +2 to 40% on the synthetic repos, +34 to 42% on Spring PetClinic, +165 to 292% on a Gradle project. After an upgrade only the new artifact downloads. | Measured on EKS |
 | 3 | **Can we use the build cache?** | Not for this use case. It saves −90 to −98% when the same repo is rebuilt with few changes, but upgrade builds hit cold repos, and a version bump in a parent POM/BOM invalidates every module (measured: ~0% gain). A cache hit also skips tests, which defeats the proof. | Measured on EKS |
 | 4 | **Can we skip plugins that don't prove anything?** | Likely yes: javadoc, source jars, coverage, static analysis, signing, image builds. Keep compiler, tests and enforcer. | Not measured yet (experiment 13) |
 
 ### The resulting build command
 
 ```bash
-# pod: CPU request = limit = 2, memory 4Gi; /cache is a persistent volume
+# pod: CPU request = limit = 2, memory 4Gi; /cache is a PVC that keeps third-party packages between builds
 export MAVEN_USER_HOME=/cache/m2-home          # Maven wrapper download, cached
 mvn -B -ntp -e -Dmaven.repo.local=/cache/m2 \
     -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Djacoco.skip=true \
