@@ -1,7 +1,7 @@
 Prerequisite,Status,Why it matters,Where
-Resume only within the same run (issue #8),PR open,A second run on a surviving volume reused old timings as new ones.,PR #9
-Pin the spot node group to one AZ,To do,"A replacement spot node in the other AZ can't attach the EBS volume, so the run hangs until the 6 h deadline.",cluster.py eksctl_config
-Cache the Maven wrapper download (MAVEN_USER_HOME on the PVC),To do,"mvnw re-downloads Maven into the container on every build, adding noise to timings.",build.sh
-MAVEN_OPTS passthrough to build pods,To do,"Needed for the JIT tiering, GC and memory experiments.","build.sh, build-job template"
-"Experiment runner: experiments.txt, jbp experiment, compare.py",To do,"Runs variants on one cluster with 3 shuffled reps and compares median, spread, cost and test counts.","config/, pipeline/cli.py, report/"
-Escape free-text values in YAML templates (issue #7),To do,A quote in MAVEN_ARGS_EXTRA breaks the build Job manifest; experiments will pass many such args.,"cli.render, orchestrator render"
+Resume only within the same run (issue #8),Done,A second run on a surviving volume reused old timings as new ones.,PR #9 (merged 22 Nov)
+Pin the spot node group to one AZ,Done,"A replacement spot node in the other AZ can't attach the EBS volume, so the run hangs until the 6 h deadline.",PR #10 (merged 22 Nov)
+Cache the Maven wrapper download (MAVEN_USER_HOME on the PVC),Done,"mvnw re-downloads Maven into the container on every build, adding noise to timings.",PR #10 (merged 22 Nov)
+MAVEN_OPTS passthrough to build pods,Done,"Needed for the JIT tiering, GC and memory experiments.",PR #10 (merged 22 Nov)
+"Experiment runner: experiments.txt, jbp experiment, compare.py",Done,"Runs variants on one cluster with 3 shuffled reps and compares median, spread, cost and test counts.",PR #10 (merged 22 Nov)
+Escape free-text values in YAML templates (issue #7),Done,A quote in MAVEN_ARGS_EXTRA breaks the build Job manifest; experiments will pass many such args.,PR #10 (merged 22 Nov)
