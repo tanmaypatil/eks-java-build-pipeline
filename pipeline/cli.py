@@ -199,7 +199,7 @@ def collect(cfg: Settings, r: Run, values: dict) -> None:
 
 def make_report(r: Run, cfg: Settings) -> Path | None:
     meta = {"context": cfg.get("_context", ""), "RUN_ID": r.id}
-    for key in ("BUILD_CPU", "BUILD_MEM", "MAX_PARALLEL", "DEP_CACHE", "MAVEN_ARGS_EXTRA", "GRADLE_ARGS_EXTRA",
+    for key in ("BUILD_CPU", "BUILD_MEM", "MAX_PARALLEL", "DEP_CACHE", "MAVEN_ARGS_EXTRA", "GRADLE_ARGS_EXTRA", "DEP_BUMP",
                 "INSTANCE_TYPES", "NODE_COUNT", "AWS_REGION"):
         meta[key] = cfg.get(key, "")
     (r.dir / "run.env").write_text("".join(f"{k}={v}\n" for k, v in meta.items()))

@@ -71,6 +71,7 @@ def tone(p):
 
 # ---- gather: (experiment, variant, repo) -> list of result dicts (one per rep)
 cells = {}
+spans = {}
 for run in meta.get("runs", []):
     exp = next((e for e in meta["experiments"] if e["id"] == run["experiment"]), None)
     if not exp:
@@ -79,6 +80,12 @@ for run in meta.get("runs", []):
     for repo in var["repos"]:
         r = load(run["run_id"], repo)
         cells.setdefault((exp["id"], var["name"], repo), []).append(r or {"ok": False, "missing": True})
+    # Throughput: first build start to last build end of this run, across all its repos (with MAX_PARALLEL > 1
+    # the builds overlap, so this is what "repos verified per hour" depends on). Only runs where every repo passed.
+    rs = [load(run["run_id"], repo) for repo in var["repos"]]
+    if rs and all(r and r.get("ok") and num(r.get("build_start_ms")) and num(r.get("build_end_ms")) for r in rs):
+        span = (max(num(r["build_end_ms"]) for r in rs) - min(num(r["build_start_ms"]) for r in rs)) / 1000
+        spans.setdefault((exp["id"], var["name"]), []).append(span)
 
 csv_rows = []
 sections = []
@@ -139,6 +146,20 @@ for exp in meta["experiments"]:
     geo_tds = "".join(f'<td class="num {tone(None if vn == base else geo[vn])}"><b>{"–" if vn == base else fmt_pct(geo[vn])}</b></td>'
                       for vn in vnames)
     body.append(f'<tr class="geo"><th>All repos <small>(geometric mean vs baseline)</small></th>{geo_tds}</tr>')
+    span = {vn: med(spans.get((exp["id"], vn), [])) for vn in vnames}
+    if any(span.values()):
+        nrep = {v["name"]: len(v["repos"]) for v in exp["variants"]}
+        bspan = span.get(base)
+        tds = []
+        for vn in vnames:
+            if span[vn] is None:
+                tds.append('<td class="num">–</td>')
+                continue
+            p = None if vn == base else pct(span[vn], bspan)
+            tds.append(f'<td class="num {tone(p)}">{fmt_s(span[vn])}<br><small>{fmt_pct(p)} · '
+                       f'{nrep[vn] * 3600 / span[vn]:.0f} repos/h</small></td>')
+        body.append('<tr class="geo"><th>All repos, wall time <small>(first build start to last build end; '
+                    'parallel builds overlap)</small></th>' + "".join(tds) + "</tr>")
     vsettings = {v["name"]: " ".join(f"{k}={val}" for k, val in v["settings"].items()) or "defaults" for v in exp["variants"]}
     settings_row = "".join(f'<td class="num settings">{E(vsettings[vn])}</td>' for vn in vnames)
     body.append(f'<tr class="settings"><th>Settings</th>{settings_row}</tr>')

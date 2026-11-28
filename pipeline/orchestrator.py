@@ -37,10 +37,12 @@ HERE = Path(__file__).resolve().parent
 # Settings passed to build.sh as env vars: template placeholder -> settings key. Their values are free
 # text, so render() escapes them for YAML.
 FREE_TEXT_ENV = {"MAVEN_ARGS": "MAVEN_ARGS_EXTRA", "GRADLE_ARGS": "GRADLE_ARGS_EXTRA", "MAVEN_OPTS": "MAVEN_OPTS_EXTRA",
-                 "BUILD_CACHE": "BUILD_CACHE", "BUILD_CACHE_EDIT": "BUILD_CACHE_EDIT"}
+                 "BUILD_CACHE": "BUILD_CACHE", "BUILD_CACHE_EDIT": "BUILD_CACHE_EDIT",
+                 "DEP_BUMP": "DEP_BUMP"}
 # ...and the env var name build.sh reads for each placeholder.
 BUILD_ENV_NAME = {"MAVEN_ARGS": "MAVEN_ARGS_EXTRA", "GRADLE_ARGS": "GRADLE_ARGS_EXTRA", "MAVEN_OPTS": "MAVEN_OPTS",
-                  "BUILD_CACHE": "BUILD_CACHE", "BUILD_CACHE_EDIT": "BUILD_CACHE_EDIT"}
+                  "BUILD_CACHE": "BUILD_CACHE", "BUILD_CACHE_EDIT": "BUILD_CACHE_EDIT",
+                 "DEP_BUMP": "DEP_BUMP"}
 # CLEAR_CACHE item -> folders under /workspace/cache that it empties.
 CACHE_DIRS = {"deps": ("m2", "m2-home", "gradle"), "build": ("build-cache",)}
 

@@ -3,6 +3,7 @@
 # Required env: REPO_NAME TOOL WRAPPER JAVA WORKDIR RESULT_DIR
 # Optional env: MAVEN_ARGS_EXTRA GRADLE_ARGS_EXTRA MAVEN_GOALS GRADLE_TASKS DEP_CACHE (shared|none)
 #               MAVEN_OPTS (JVM flags for Maven itself) BUILD_CACHE (off|on) BUILD_CACHE_EDIT (leaf|root)
+#               DEP_BUMP (simulated dependency upgrade, see below)
 # No "set -e" on purpose: a failing build must still reach the measurement and JSON-writing code below.
 set -uo pipefail
 : "${REPO_NAME:?}" "${TOOL:?}" "${WORKDIR:?}" "${RESULT_DIR:?}"
@@ -101,18 +102,62 @@ XML
     if [ -n "$f" ]; then echo "// jbp edit-marker $(date +%s%N)" >> "$f"; echo "[jbp] edited $f ($BUILD_CACHE_EDIT)"
     else echo "[jbp] BUILD_CACHE_EDIT=$BUILD_CACHE_EDIT: no mod-* module found, nothing edited"; fi
   fi
+  # DEP_BUMP simulates the remediation change: a library version raised in the root pom.xml before the
+  # build. Rules, separated by spaces or commas; each applies only where it matches, so one setting can
+  # cover repos with different build files:
+  #   ARTIFACT=VERSION      the <version> right after <artifactId>ARTIFACT</artifactId> (a dependency, a
+  #                         BOM import in dependencyManagement, a plugin or the <parent>)
+  #   prop:NAME=VERSION     the property <NAME>; if the POM doesn't define it but has a <parent> (e.g.
+  #                         spring-boot-starter-parent, which manages tomcat.version), it is added to
+  #                         <properties>, which overrides the parent's value: the usual CVE fix there
+  # If DEP_BUMP is set and no rule matched, the build is not run (rc 3): the experiment would be invalid.
+  BUMP_APPLIED=""
+  if [ -n "${DEP_BUMP:-}" ]; then
+    cp pom.xml "$RESULT_DIR/$REPO_NAME.pom.orig"
+    for rule in $(echo "$DEP_BUMP" | tr ',' ' '); do
+      key=${rule%%=*}; ver=${rule#*=}
+      case "$key" in
+        prop:*)
+          p=${key#prop:}
+          if grep -q "<$p>" pom.xml; then
+            sed -i "0,/<$p>[^<]*<\/$p>/s//<$p>$ver<\/$p>/" pom.xml && BUMP_APPLIED="$BUMP_APPLIED $rule"
+          elif grep -q "<parent>" pom.xml && grep -q "<properties>" pom.xml; then
+            sed -i "0,/<properties>/s//<properties>\n    <$p>$ver<\/$p>/" pom.xml && BUMP_APPLIED="$BUMP_APPLIED $rule"
+          fi ;;
+        *)
+          if awk -v a="$key" -v v="$ver" '
+              index($0, "<artifactId>" a "</artifactId>") { hit = 1 }
+              hit && /<version>/ { sub(/<version>[^<]*<\/version>/, "<version>" v "</version>"); hit = 0; done = 1 }
+              /<\/(dependency|parent|plugin)>/ { hit = 0 }
+              { print }
+              END { exit done ? 0 : 1 }' pom.xml > pom.xml.jbp; then
+            mv pom.xml.jbp pom.xml; BUMP_APPLIED="$BUMP_APPLIED $rule"
+          else rm -f pom.xml.jbp; fi ;;
+      esac
+    done
+    BUMP_APPLIED=${BUMP_APPLIED# }
+    if [ -n "$BUMP_APPLIED" ]; then
+      echo "[jbp] DEP_BUMP applied: $BUMP_APPLIED"
+      diff "$RESULT_DIR/$REPO_NAME.pom.orig" pom.xml | grep -E '^[<>]' | sed 's/^/[jbp]   /'
+    fi
+  fi
   CMD="$MVN -B -ntp -e $CACHE_ARGS ${MAVEN_ARGS_EXTRA:-} ${MAVEN_GOALS:-verify}"
+  if [ -n "${DEP_BUMP:-}" ] && [ -z "$BUMP_APPLIED" ]; then
+    CMD="echo '[ERROR] DEP_BUMP=$DEP_BUMP matched nothing in pom.xml, build not run'; exit 3"
+  fi
 elif [ "$TOOL" = gradle ]; then
   GR=gradle; [ "${WRAPPER:-no}" = yes ] && chmod +x gradlew && GR=./gradlew
   [ "${DEP_CACHE:-shared}" = shared ] && export GRADLE_USER_HOME="$CACHE_ROOT/gradle"
   CMD="$GR --no-daemon --console=plain ${GRADLE_ARGS_EXTRA:-} ${GRADLE_TASKS:-build}"
+  BUMP_APPLIED=""
+  [ -n "${DEP_BUMP:-}" ] && CMD="echo '[ERROR] DEP_BUMP is Maven-only for now, build not run'; exit 3"
 else
-  echo "unknown tool '$TOOL'" | tee "$LOG"; CMD="false"
+  echo "unknown tool '$TOOL'" | tee "$LOG"; CMD="false"; BUMP_APPLIED=""
 fi
 
 echo "[jbp] repo=$REPO_NAME tool=$TOOL java=$JAVA wrapper=${WRAPPER:-no}" | tee "$LOG"
 echo "[jbp] cmd: $CMD" | tee -a "$LOG"
-echo "[jbp] MAVEN_OPTS=${MAVEN_OPTS:-} BUILD_CACHE=${BUILD_CACHE:-off} BUILD_CACHE_EDIT=${BUILD_CACHE_EDIT:-}" | tee -a "$LOG"
+echo "[jbp] MAVEN_OPTS=${MAVEN_OPTS:-} BUILD_CACHE=${BUILD_CACHE:-off} BUILD_CACHE_EDIT=${BUILD_CACHE_EDIT:-} DEP_BUMP=${DEP_BUMP:-}" | tee -a "$LOG"
 java -version 2>&1 | tee -a "$LOG"
 
 # Snapshot the counters immediately before and after the build: the deltas measure the build alone,
@@ -164,6 +209,7 @@ cat > "$OUT" <<EOF
  "tests":$tests,"failures":$failures,"errors":$errors,"skipped":$skipped,
  "cache_hits":$(grep -c 'Found cached build' "$LOG" || true),"downloaded_kb":$((dl1 - dl0)),
  "maven_opts":"$(echo "${MAVEN_OPTS:-}" | tr '"\\' "'/")","build_cache":"${BUILD_CACHE:-off}","build_cache_edit":"${BUILD_CACHE_EDIT:-}",
+ "dep_bump":"$BUMP_APPLIED",
  "error_excerpt":"$last_err"}
 EOF
 echo "[jbp] rc=$rc build_s=$((dur_ms/1000)) tests=$tests failures=$failures errors=$errors" | tee -a "$LOG"

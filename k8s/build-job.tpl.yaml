@@ -58,6 +58,7 @@ spec:
             - {name: MAVEN_OPTS, value: "__MAVEN_OPTS__"}             # JVM flags for Maven itself
             - {name: BUILD_CACHE, value: "__BUILD_CACHE__"}           # on = Maven build-cache extension
             - {name: BUILD_CACHE_EDIT, value: "__BUILD_CACHE_EDIT__"} # leaf|root = edit a module first
+            - {name: DEP_BUMP, value: "__DEP_BUMP__"}                 # simulated dependency upgrade
           # requests == limits gives the pod "Guaranteed" QoS, the same shape as an OpenShift build pod.
           # The CPU limit becomes the cgroup CFS quota: the JVM sizes its thread pools from it, and
           # build.sh measures how often it throttles the build.
