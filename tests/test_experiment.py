@@ -27,7 +27,7 @@ class PlanTest(unittest.TestCase):
         known = [ln.split()[0] for ln in (ROOT / "config" / "repos.txt").read_text().splitlines()
                  if ln.split() and not ln.startswith("#")]
         plan = experiment.parse_plan((ROOT / "config" / "experiments.txt").read_text(), known)
-        self.assertEqual([e.id for e in plan.experiments], ["cpu-scaling", "build-cache", "dep-cache"])
+        self.assertEqual([e.id for e in plan.experiments], ["cpu-scaling", "build-cache", "dep-cache", "remediation"])
         self.assertEqual(plan.settings["INSTANCE_TYPES"], "m6a.2xlarge")
         self.assertEqual(len(plan.experiments[2].variants[0].repos), 8)
         for e in plan.experiments:
@@ -87,7 +87,7 @@ class RenderEscapeTest(unittest.TestCase):
         except ImportError:
             self.skipTest("PyYAML not installed")
         cfg = settings(MAVEN_ARGS_EXTRA='-DargLine="-Xmx1g -Dx=a\\b"', MAVEN_OPTS_EXTRA="-XX:TieredStopAtLevel=1",
-                       BUILD_CACHE="on", BUILD_CACHE_EDIT="leaf")
+                       BUILD_CACHE="on", BUILD_CACHE_EDIT="leaf", DEP_BUMP="junit-bom=5.14.1 prop:tomcat.version=11.0.29")
         l = K8sLauncher(cfg, ROOT / "k8s" / "build-job.tpl.yaml", Path(tempfile.mkdtemp()), "r1")
         plan = Plan("maven", False, 21, "x", 21, "maven:3.9.11-eclipse-temurin-21", Path("/workspace/repos/a"))
         doc = yaml.safe_load(l.render(RepoSpec("a", "u"), plan))
@@ -96,6 +96,7 @@ class RenderEscapeTest(unittest.TestCase):
         self.assertEqual(env["MAVEN_OPTS"], "-XX:TieredStopAtLevel=1")
         self.assertEqual(env["BUILD_CACHE"], "on")
         self.assertEqual(env["BUILD_CACHE_EDIT"], "leaf")
+        self.assertEqual(env["DEP_BUMP"], "junit-bom=5.14.1 prop:tomcat.version=11.0.29")
 
     def test_yaml_dq(self):
         self.assertEqual(yaml_dq('a"b\\c'), 'a\\"b\\\\c')
@@ -158,3 +159,89 @@ class CompareReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+POM_BOM = """<project>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+  </properties>
+  <dependencyManagement><dependencies>
+    <dependency>
+      <groupId>org.junit</groupId>
+      <artifactId>junit-bom</artifactId>
+      <version>5.13.4</version>
+      <type>pom</type><scope>import</scope>
+    </dependency>
+  </dependencies></dependencyManagement>
+</project>
+"""
+POM_PARENT = """<project>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.2.0</version>
+  </parent>
+  <properties>
+    <java.version>17</java.version>
+  </properties>
+</project>
+"""
+
+
+class DepBumpTest(unittest.TestCase):
+    """build.sh DEP_BUMP rules, with a stub mvn so nothing is downloaded."""
+
+    def build(self, pom, bump):
+        import subprocess, json, os, stat
+        d = Path(tempfile.mkdtemp())
+        (d / "repo").mkdir()
+        (d / "repo" / "pom.xml").write_text(pom)
+        (d / "bin").mkdir()
+        mvn = d / "bin" / "mvn"
+        mvn.write_text("#!/bin/sh\necho stub mvn \"$@\"\n")
+        mvn.chmod(mvn.stat().st_mode | stat.S_IEXEC)
+        env = dict(os.environ, PATH=f"{d / 'bin'}:{os.environ['PATH']}", REPO_NAME="r", TOOL="maven", JAVA="17",
+                   WORKDIR=str(d / "repo"), RESULT_DIR=str(d / "res"), DEP_CACHE="none", DEP_BUMP=bump)
+        cp = subprocess.run(["bash", str(ROOT / "pipeline" / "build.sh")], env=env, capture_output=True, text=True)
+        out = json.loads((d / "res" / "r.build.json").read_text())
+        return cp.returncode, out, (d / "repo" / "pom.xml").read_text()
+
+    RULES = "junit-bom=5.14.1 prop:tomcat.version=11.0.29"
+
+    def test_artifact_rule_bumps_the_bom_only(self):
+        rc, out, pom = self.build(POM_BOM, self.RULES)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["dep_bump"], "junit-bom=5.14.1")
+        self.assertIn("<version>5.14.1</version>", pom)
+        self.assertNotIn("tomcat.version", pom)   # no <parent>: the property can't be inherited, so not added
+
+    def test_property_rule_overrides_a_parent_managed_version(self):
+        rc, out, pom = self.build(POM_PARENT, self.RULES)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["dep_bump"], "prop:tomcat.version=11.0.29")
+        self.assertIn("<tomcat.version>11.0.29</tomcat.version>", pom)
+        self.assertIn("<version>4.2.0</version>", pom)   # the parent itself is untouched
+
+    def test_existing_property_is_replaced(self):
+        rc, out, pom = self.build(POM_PARENT, "prop:java.version=21")
+        self.assertEqual(rc, 0)
+        self.assertIn("<java.version>21</java.version>", pom)
+        self.assertNotIn("<java.version>17</java.version>", pom)
+
+    def test_no_match_fails_without_building(self):
+        rc, out, pom = self.build(POM_BOM, "jackson-bom=9.9.9")
+        self.assertEqual(rc, 3)
+        self.assertIn("matched nothing", out["error_excerpt"])
+        self.assertEqual(pom, POM_BOM)
+
+
+class PlanFileTest(unittest.TestCase):
+    def test_repo_plan_parses(self):
+        known = ["perf-p1-tiny-j17", "perf-p3-medium-j25", "perf-p4-medium-j17", "perf-p5-large-j21",
+                 "perf-p6-xlarge-j25", "petclinic", "rest-svc-gradle"]
+        plan = experiment.parse_plan((ROOT / "config" / "experiments.txt").read_text(), known)
+        rem = next(e for e in plan.experiments if e.id == "remediation")
+        self.assertEqual(rem.baseline, "nobump")
+        par3 = next(v for v in rem.variants if v.name == "bump-skip-par3")
+        self.assertEqual(par3.settings["MAX_PARALLEL"], "3")
+        self.assertEqual(par3.repos, ["perf-p4-medium-j17", "perf-p6-xlarge-j25", "petclinic"])

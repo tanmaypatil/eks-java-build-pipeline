@@ -1,197 +1,87 @@
-# Java build tuning on Kubernetes
+# Java build optimisation
 
-**What drives Java build time, and which settings make builds faster in the cloud?** This repo answers
-that with experiments. It is a pipeline that builds a list of Java repos (Maven and Gradle) inside
-Kubernetes pods, measures every build (time, CPU used, CPU throttling, memory, tests), and runs the same
-builds again with one parameter changed: pod CPU and memory, Maven module parallelism, JVM flags, test
-settings, dependency and build caches. The target platform is OpenShift, so build pods are sized like
-OpenShift build pods (CPU request = limit).
+**Goal:** after a dependency upgrade in `pom.xml` or `build.gradle` (for example a vulnerability fix), prove
+that the repo still builds and its tests pass, **as fast and as cheaply as possible**. The build is a check, not
+a release: if it passes, a PR is raised.
 
-The Kubernetes cluster is only the test bed. Three are interchangeable:
+This repo is the pipeline that runs those builds in Kubernetes pods (target: OpenShift) and the experiments
+that measure what makes them faster.
 
-| Test bed | Command | Cost | Use it for |
+## The four questions
+
+| # | Question | Answer so far | Status |
 |---|---|---|---|
-| Docker on your machine | `./jbp local-docker` | free | quick checks, rehearsing an experiment |
-| kind (Kubernetes in Docker) | `./jbp local-kind up/run/down` | free | the real Kubernetes path, small repos |
-| Ephemeral EKS on AWS | `./jbp all`, `./jbp experiment` | cents per run | numbers you trust: a real cloud node, created per session and always torn down |
+| 1 | **The pod has more CPU: can the build use it?** | Up to 2 CPU, yes: 1 → 2 CPU halves build time. Beyond that only with Maven module parallelism: 4 CPU alone −13 to −22%, 4 CPU with `-T1C` −26 to −30%. `-T1C` makes a 2-CPU pod 5 to 11% *slower*. `-T1C` does nothing for single-module repos. | Measured on EKS |
+| 2 | **Can we avoid downloading third-party packages every time?** | Yes: keep them on a **PVC** mounted into every build pod (`-Dmaven.repo.local=/cache/m2`, `MAVEN_USER_HOME` and `GRADLE_USER_HOME` on it). Cold downloads cost +2 to 40% on the synthetic repos, +34 to 42% on Spring PetClinic, +165 to 292% on a Gradle project. After an upgrade only the new artifact downloads. | Measured on EKS |
+| 3 | **Can we use the build cache?** | Not for this use case. It saves −90 to −98% when the same repo is rebuilt with few changes, but upgrade builds hit cold repos, and a version bump in a parent POM/BOM invalidates every module (measured: ~0% gain). A cache hit also skips tests, which defeats the proof. | Measured on EKS |
+| 4 | **Can we skip plugins that don't prove anything?** | Likely yes: javadoc, source jars, coverage, static analysis, signing, image builds. Keep compiler, tests and enforcer. | Not measured yet (experiment 13) |
 
-**The experiment plan** (what we test, exact pod sizes, repos and flags, objectives) is in
-[docs/experiments/](docs/experiments/README.md). `./jbp experiment` runs it and writes a comparison page.
+### The resulting build command
 
-## How one run works (EKS)
+```bash
+# pod: CPU request = limit = 2, memory 4Gi; /cache is a PVC that keeps third-party packages between builds
+export MAVEN_USER_HOME=/cache/m2-home          # Maven wrapper download, cached
+mvn -B -ntp -e -Dmaven.repo.local=/cache/m2 \
+    -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Djacoco.skip=true \
+    -Dcheckstyle.skip=true -Dspotbugs.skip=true -Dpmd.skip=true \
+    verify
+# no -T1C at 2 CPU, no build cache
 
-```
-./jbp all
-  ├─ UP           eksctl: EKS + 1 spot node (public subnets, no NAT) + EBS CSI            ~15-20 min
-  ├─ DEPLOY       ConfigMaps (code, repo list, settings), RBAC, PVC, orchestrator Job
-  ├─ ORCHESTRATE  Job jbp-orchestrator (alpine/k8s, python3 pipeline/orchestrator.py)
-  │                 for each repo in config/repos.txt, one by one:
-  │                   CLONE    git clone --depth 1 -> PVC /workspace/repos/<name>   (retried on network errors)
-  │                   DETECT   detect.py: maven|gradle, wrapper?, Java version needed -> JDK -> image
-  │                   LAUNCH   Job jbp-build-<name> in the matching image
-  │                   WAIT     build.sh: mvn -B verify / gradle build, timings, cgroup CPU + memory, JUnit counts
-  │                            (fails early on ImagePullBackOff / Unschedulable instead of waiting for the timeout)
-  │                   COLLECT  results/<name>.json
-  ├─ COLLECT      copy /workspace/results off the PVC
-  ├─ REPORT       runs/<RUN_ID>/report.html + summary.csv
-  └─ DOWN         delete namespace (frees EBS) -> eksctl delete -> poll AWS until nothing is left  ~10 min
+# Gradle
+GRADLE_USER_HOME=/cache/gradle ./gradlew build --no-daemon -x javadoc -x jacocoTestReport
 ```
 
-Full architecture write-up: [`docs/architecture.html`](docs/architecture.html) (download and open in a browser).
+Every flag, the variants for other cases (more CPU, build cache) and the evidence behind each:
+[docs/experiments/production-recipes.csv](docs/experiments/production-recipes.csv) (also written out in
+[docs/experiments/README.md](docs/experiments/README.md#production-recipes)).
 
-DOWN always runs (`try/finally` plus a SIGTERM handler), also after a failure or Ctrl-C.
+## How it measures
 
-## Where is my run? (logging and tracing)
+```
+./jbp experiment --reps 3
+  cluster up (1 spot node) -> warm-up -> each variant in config/experiments.txt, repeated -> comparison.html -> cluster down
+```
 
-- **Console + `runs/<RUN_ID>/driver.log`**: every line is `time level component [repo|STAGE] message`, e.g.
-  `2026-11-14T11:28:26Z INFO  orchestrator [perf-p2-small-j21|DETECT] tool=maven, needs Java 21 (.mvn/jdk) -> JDK 21`.
-  The orchestrator's lines are streamed from the pod with a `  | ` prefix. The log file also has every command run, with retries.
-- **`./jbp status [RUN_ID]`**: the driver's phase plus the stage of every repo, read live from the orchestrator pod
-  (or from the collected results once the run is over).
-- **Files**: `driver_status.json` / `driver_events.jsonl` (driver phases) and `results/_status.json` /
-  `results/events.jsonl` / `results/orchestrator.log` (per-repo stages, timestamps, errors).
+Each build runs in its own pod with a fixed CPU/memory limit and records build time, CPU used, CPU throttling,
+peak memory, tests run and MB downloaded. Variants change one setting at a time; the report compares medians
+against a baseline and checks the test count didn't drop.
 
-## Errors and recovery
+| Test bed | Command | Cost |
+|---|---|---|
+| Docker on your machine | `./jbp experiment --local` or `./jbp local-docker` | free |
+| kind (Kubernetes in Docker) | `./jbp local-kind up / run / down` | free |
+| Ephemeral EKS on AWS | `./jbp experiment`, `./jbp all` | ~$0.22/h while up; the 3-experiment pilot cost $0.65 |
 
-| What fails | What happens |
-|---|---|
-| git clone network error / HTTP 5xx / 429 | retried `CLONE_RETRIES` times with growing back-off, then the repo is marked FAILED (clone) |
-| `kubectl` call to the API | retried; the build watch tolerates 12 failed reads in a row before giving up |
-| image can't be pulled | build failed after `IMAGE_PULL_GRACE_S` (180 s) as `image`, not after the 30 min timeout |
-| pod can't be scheduled | failed after `UNSCHEDULABLE_GRACE_S` (600 s) as `unschedulable`, with the scheduler's reason |
-| build or tests fail / time out | `build` / `timeout`, with the first error lines in the report |
-| one repo fails | logged and recorded; the run carries on with the next repo |
-| spot reclaim / orchestrator restart | Job `podFailurePolicy` retries it; repos that passed are skipped, failed ones are retried (resume) |
-| teardown incomplete | `jbp down` polls AWS for up to 20 min and lists whatever is still billing |
+The cluster is always torn down at the end, also after a failure or Ctrl-C; `./jbp leftovers` checks nothing
+is still billing.
+
+## Results
+
+- [EKS pilot, 22 Nov 2026](docs/experiments/results/2026-11-22-eks-pilot.html): experiments 1, 3, 5, 59/59 builds passed (1 rep; download and open in a browser).
+- [Experiment plan and tracker](docs/experiments/README.md): every experiment with objective, exact flags and result.
 
 ## Quick start
 
-Prerequisites wherever you run `jbp` (your laptop, or the Claude cloud session): `python3` ≥ 3.9, `aws` CLI with
-credentials, `eksctl` ≥ 0.200, `kubectl`. No Python packages needed (standard library only).
+Needs `python3` ≥ 3.9 (standard library only); for EKS also `aws` (with credentials), `eksctl` ≥ 0.200 and `kubectl`.
 
 ```bash
-# 1. free dry run with Docker only (no cluster): same orchestrator + build.sh, a local folder stands in for the PVC
-./jbp local-docker
-
-# 2. free rehearsal on real Kubernetes (Docker + kind)
-./jbp local-kind up && ./jbp local-kind run && ./jbp local-kind down
-
-# 3. the real thing on AWS (costs money, see below)
-./jbp all                 # up -> run -> report -> down
-./jbp all --keep          # leave the cluster up for several runs; then ./jbp down
-./jbp status              # where is the latest run right now
-./jbp leftovers           # anything still billing? (--delete removes orphaned volumes)
-./jbp experiment --reps 3 # run the experiment plan (config/experiments.txt) -> comparison.html
-
-# any setting can be overridden per run
-BUILD_CPU=4 BUILD_MEM=8Gi MAVEN_ARGS_EXTRA=-T1C ./jbp run --repos config/my-repos.txt
+./jbp experiment --local --reps 1    # free rehearsal of the experiment plan with Docker
+./jbp experiment --reps 3            # the same on EKS (costs money; tears down at the end)
+./jbp leftovers                      # anything still billing?
+python3 -m unittest discover -s tests
 ```
 
-## The repo list
-
-`config/repos.txt`, one repo per line:
-
-```
-# name           url                                               ref  subdir    overrides
-petclinic        https://github.com/spring-projects/spring-petclinic.git  -  -
-rest-svc-gradle  https://github.com/spring-guides/gs-rest-service.git     -  complete  tool=gradle
-```
-
-`ref` is a branch/tag/sha (`-` = default branch). `subdir` builds a sub-folder. Overrides:
-`tool=maven|gradle` (for repos that have both, Maven wins by default) and `java=21`.
-Private repos: put a token in the URL via a Kubernetes Secret (not wired yet; easy to add).
-
-The default list builds the six synthetic benchmark repos (`tanmaypatil/perf-p1-tiny-j17` … `perf-p6-xlarge-j25`)
-plus Spring PetClinic (Maven wrapper) and a Gradle-wrapper guide in a subfolder.
-
-## Java version detection
-
-`pipeline/detect.py` (try it: `python3 pipeline/detect.py <repo-dir>`), first hit wins:
-
-1. `.java-version`, `.sdkmanrc`, `.tool-versions`, `.mvn/jdk`
-2. Maven, `pom.xml` parsed as XML with `${property}` references resolved (also from a local parent pom),
-   highest across all modules: `maven.compiler.release`, compiler-plugin `<release>`,
-   `java.version` (Spring Boot), `maven.compiler.target/source`, `.mvn/toolchains.xml`
-3. Gradle: `JavaLanguageVersion.of(N)`, `jvmToolchain(N)`, `options.release`,
-   `JavaVersion.VERSION_N`, `sourceCompatibility`
-4. Default 17
-
-The build then runs on the **smallest supported JDK ≥ the version needed** (11/17/21/25; edit
-`config/images.env`). `1.8` maps to JDK 11, which still compiles `--release 8`.
-Tests: `python3 -m unittest discover -s tests` (55 tests: detection, repo-list parsing, pod-failure
-classification, stage tracking, manifest rendering).
-
-## Settings (`config/settings.env`, plain `KEY=value`, each overridable by an env var of the same name)
-
-| Setting | Default | Notes |
-|---|---|---|
-| `INSTANCE_TYPES` | m7a/m6a/m7i/m6i/m5/m5a `.xlarge` | 4 vCPU / 16 GiB, several types so spot capacity is easy |
-| `NODE_COUNT` | 1 | the PVC is EBS (ReadWriteOnce) so builds share one node |
-| `K8S_VERSION` | auto | newest version in EKS **standard** support. Extended support costs $0.60/h instead of $0.10/h |
-| `BUILD_CPU` / `BUILD_MEM` | 2 / 4Gi | request = limit, like a Guaranteed pod on OpenShift |
-| `MAX_PARALLEL` | 1 | builds strictly one by one. 2-3 on a 2xlarge node shortens wall time |
-| `DEP_CACHE` | shared | `~/.m2` and `GRADLE_USER_HOME` on the PVC, reused across repos. `none` = cold builds |
-| `MAVEN_ARGS_EXTRA` | | e.g. `-T1C`, `-DskipTests` for optimisation runs |
-| `MAVEN_OPTS_EXTRA` | | JVM flags for Maven itself (`MAVEN_OPTS` in the build pod), e.g. `-XX:TieredStopAtLevel=1` |
-| `BUILD_CACHE` / `BUILD_CACHE_EDIT` / `CLEAR_CACHE` | off / / | experiment switches, see [docs/experiments](docs/experiments/README.md) |
-| `NODE_AZ` | first zone offering every type | the node group stays in one zone, so a spot replacement can attach the EBS volume |
-| `IMAGE_REGISTRY` | `public.ecr.aws/docker/library/` | AWS mirror of Docker official images: no Docker Hub rate limit |
-
-Spot reclaims are handled: Jobs use a `podFailurePolicy` that retries pods hit by a
-`DisruptionTarget` without counting it as a failure, and a restarted orchestrator skips repos
-that already passed and retries the ones that failed.
-
-## Report
-
-`runs/<RUN_ID>/report.html` (self-contained) and `summary.csv`. Per repo: pass/fail, tool,
-Java needed and where that came from, image, clone time, wait + image pull time, build time,
-test counts, average cores used vs the CPU limit, CPU throttling %, peak memory vs the limit,
-and a link to the full build log. Cost section: measured cost of the run (when it went through
-`jbp all`) and a projection for an ephemeral EKS run of the same workload.
-
-## Cost per run (us-east-1, on-demand list prices Nov 2026, spot is approximate)
-
-What a typical run bills: control plane for the whole up → down window, the spot node from
-when it starts to when it's drained, EBS, a public IPv4 per node. No NAT gateway, no load
-balancer, no CloudWatch logs.
-
-| Run | Control plane ($0.10/h) | 1 spot xlarge (~$0.07/h) | EBS + IPv4 | **Total** |
-|---|---|---|---|---|
-| 4 small repos, ~10 min of builds (≈ 45 min end to end) | $0.075 | $0.03 | < $0.01 | **≈ $0.11** |
-| 10 medium repos, ~45 min of builds (≈ 80 min) | $0.13 | $0.07 | < $0.01 | **≈ $0.21** |
-| same, node on-demand instead of spot (~$0.19/h) | $0.13 | $0.18 | < $0.01 | ≈ $0.32 |
-
-Fixed overhead per run is ~30 min of cluster create + delete (≈ $0.06), which is mostly
-waiting rather than money. Keeping a cluster up permanently costs ~$73/month for the
-control plane alone, so ephemeral is cheaper unless you run many times a day; in that case use
-`--keep` and scale the node group to 0 between runs.
-
-Watch-outs that cost real money: an EKS version that has dropped into extended support (6x control
-plane price), a NAT gateway (avoided here), EBS volumes left after a failed teardown
-(`jbp leftovers` finds them, they're tagged `jbp-cluster=<name>`).
-
-## Next optimisations (phase 2)
-
-- Feed in the earlier benchmark's wins: `MAVEN_ARGS_EXTRA=-T1C`, `MAVEN_OPTS_EXTRA=-XX:TieredStopAtLevel=1`, JUnit parallel.
-- Size pods from the report: avg cores ≪ limit means the limit can shrink, throttling ≫ 0 means it's too small.
-- Pre-pull build images (DaemonSet) or bake an AMI so wait+pull drops to ~0.
-- Maven Central rate-limits (HTTP 429) bursts from one IP; we hit it in testing. Put a mirror in front
-  (CodeArtifact / Nexus) or persist the dependency cache between runs (EBS snapshot or S3) instead of re-downloading.
-- Parallel builds on a bigger node (`MAX_PARALLEL=3`, `INSTANCE_TYPES=m7a.2xlarge,...`), or EFS for multi-node.
-- Cheaper still for experiments only: k3s on a single spot EC2 instance (no $0.10/h control plane, ~2 min start).
+Repos to build: `config/repos.txt`. Defaults: `config/settings.env` (any key can be overridden by an env var).
 
 ## Layout
 
 ```
-jbp                 entry point (./jbp --help)
-pipeline/           cli.py (driver) · cluster.py (eksctl up/down, leftovers poller) · orchestrator.py ·
-                    detect.py · jbpcore.py (settings, logging, retries, stage tracking) · build.sh
-                    -> everything in pipeline/ is mounted into the pods via the jbp-code ConfigMap
-k8s/                orchestrator-job.yaml build-job.tpl.yaml rbac.yaml pvc.yaml storageclass-eks.yaml collector-pod.yaml
-config/             repos.txt images.env settings.env
-report/             make_report.py
-tests/              unit tests (python3 -m unittest discover -s tests)
-docs/               architecture.html
+jbp                  entry point (./jbp --help)
+pipeline/            cli.py (driver) · experiment.py (plans) · cluster.py (EKS up/down) · orchestrator.py ·
+                     detect.py (Maven/Gradle, Java version) · jbpcore.py · build.sh (runs inside the build pod)
+config/              repos.txt · experiments.txt · settings.env · images.env
+k8s/                 Job, PVC, RBAC and StorageClass manifests
+report/              make_report.py (one run) · compare.py (an experiment session)
+docs/                experiments/ (plan, recipes, results) · operations.md (logging, errors, settings, cost) ·
+                     architecture.html · code-reference.html
 ```
-
-`build.sh` stays a shell script on purpose: it runs inside the stock Maven/Temurin images, which have no Python.

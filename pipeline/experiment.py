@@ -16,7 +16,7 @@ from jbpcore import ConfigError
 # Settings a variant may change. Anything else (cluster shape, namespace...) must stay fixed for the whole
 # session, or the variants wouldn't be comparable.
 VARIANT_KEYS = {"BUILD_CPU", "BUILD_MEM", "DEP_CACHE", "MAVEN_ARGS_EXTRA", "GRADLE_ARGS_EXTRA", "MAVEN_OPTS_EXTRA",
-                "BUILD_CACHE", "BUILD_CACHE_EDIT", "CLEAR_CACHE", "BUILD_TIMEOUT_S"}
+                "BUILD_CACHE", "BUILD_CACHE_EDIT", "CLEAR_CACHE", "BUILD_TIMEOUT_S", "DEP_BUMP", "MAX_PARALLEL"}
 
 
 @dataclass

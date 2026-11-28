@@ -37,3 +37,18 @@ experiment dep-cache fixed baseline=warm objective="Measure what downloading dep
 variant dep-cache none          DEP_CACHE=none                        REPOS=all
 variant dep-cache empty         DEP_CACHE=shared CLEAR_CACHE=deps     REPOS=all
 variant dep-cache warm          DEP_CACHE=shared                      REPOS=all
+
+# Experiment 13, the real use case: bump a library version (as a vulnerability fix would), then build only to
+# prove it still compiles and its tests pass. The synthetic repos' one third-party library is JUnit (junit-bom
+# 5.13.4 -> 5.14.1); petclinic gets the classic Spring Boot CVE fix, overriding the managed Tomcat version
+# (11.0.27 -> 11.0.29). Each rule only applies to the repos whose pom.xml it matches.
+# Plugin skips: everything that doesn't prove the build (docs, sources, coverage, style and static checks, SBOM,
+# git info, the Boot fat jar). The enforcer stays: it checks the Java version. Tests stay: they are the proof.
+# Parallel variants add Maven's cross-process file locks, because several pods write the shared cache at once.
+experiment remediation fixed baseline=nobump objective="For a dependency bump (vulnerability fix), find the fastest correct verify-build and how many repos one node verifies per hour." expect="Bump with a warm cache within a few % of no bump (only the bumped jars download); cold cache +2 to 40% (pilot, exp 5); plugin skips a few % on synthetic repos, more on petclinic (checkstyle, format, jacoco, SBOM); 3 builds side by side close to 3x repos per hour if the node has the CPUs. Test counts must equal nobump."
+variant remediation nobump          DEP_CACHE=shared REPOS=p4,p6,petclinic
+variant remediation bump            DEP_CACHE=shared DEP_BUMP="junit-bom=5.14.1 prop:tomcat.version=11.0.29" REPOS=p4,p6,petclinic
+variant remediation bump-cold       DEP_CACHE=none   DEP_BUMP="junit-bom=5.14.1 prop:tomcat.version=11.0.29" REPOS=p4,p6,petclinic
+variant remediation bump-skip       DEP_CACHE=shared DEP_BUMP="junit-bom=5.14.1 prop:tomcat.version=11.0.29" MAVEN_ARGS_EXTRA="-Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Djacoco.skip=true -Dcheckstyle.skip=true -Dspotbugs.skip=true -Dpmd.skip=true -Dspring-javaformat.skip=true -Dcyclonedx.skip=true -Dmaven.gitcommitid.skip=true -Dspring-boot.repackage.skip=true" REPOS=p4,p6,petclinic
+variant remediation bump-skip-par2  DEP_CACHE=shared MAX_PARALLEL=2 DEP_BUMP="junit-bom=5.14.1 prop:tomcat.version=11.0.29" MAVEN_ARGS_EXTRA="-Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Djacoco.skip=true -Dcheckstyle.skip=true -Dspotbugs.skip=true -Dpmd.skip=true -Dspring-javaformat.skip=true -Dcyclonedx.skip=true -Dmaven.gitcommitid.skip=true -Dspring-boot.repackage.skip=true -Daether.syncContext.named.factory=file-lock -Daether.syncContext.named.nameMapper=file-gav" REPOS=p4,p6,petclinic
+variant remediation bump-skip-par3  DEP_CACHE=shared MAX_PARALLEL=3 DEP_BUMP="junit-bom=5.14.1 prop:tomcat.version=11.0.29" MAVEN_ARGS_EXTRA="-Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Djacoco.skip=true -Dcheckstyle.skip=true -Dspotbugs.skip=true -Dpmd.skip=true -Dspring-javaformat.skip=true -Dcyclonedx.skip=true -Dmaven.gitcommitid.skip=true -Dspring-boot.repackage.skip=true -Daether.syncContext.named.factory=file-lock -Daether.syncContext.named.nameMapper=file-gav" REPOS=p4,p6,petclinic
